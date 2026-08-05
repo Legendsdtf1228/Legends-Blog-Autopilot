@@ -10,13 +10,15 @@ export function createDb(connectionString: string): Db {
 }
 
 export async function migrate(db: Db): Promise<void> {
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS app_settings (
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`CREATE TABLE IF NOT EXISTS app_settings (
       singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
       value jsonb NOT NULL,
       updated_at timestamptz NOT NULL DEFAULT now()
-    );
-    CREATE TABLE IF NOT EXISTS publish_jobs (
+    )`);
+    await client.query(`CREATE TABLE IF NOT EXISTS publish_jobs (
       id bigserial PRIMARY KEY,
       slot_key text NOT NULL UNIQUE,
       scheduled_for timestamptz NOT NULL,
@@ -31,10 +33,19 @@ export async function migrate(db: Db): Promise<void> {
       error text,
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS publish_jobs_due_idx ON publish_jobs(status, next_attempt_at, scheduled_for)");
+    await client.query(
+      "INSERT INTO app_settings(singleton, value) VALUES (true, $1::jsonb) ON CONFLICT (singleton) DO NOTHING",
+      [JSON.stringify(defaultSettings)],
     );
-    CREATE INDEX IF NOT EXISTS publish_jobs_due_idx ON publish_jobs(status, next_attempt_at, scheduled_for);
-    INSERT INTO app_settings(singleton, value) VALUES (true, $1::jsonb) ON CONFLICT (singleton) DO NOTHING;
-  `, [JSON.stringify(defaultSettings)]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function getSettings(db: Db): Promise<Settings> {
