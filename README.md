@@ -17,8 +17,7 @@ A standalone, private service that autonomously chooses, writes, validates, and 
 
 1. A Railway project with a Postgres service.
 2. An OpenAI API key.
-3. A Shopify Admin API access token with `write_content` (and the read access needed to query products).
-4. The Shopify blog GraphQL ID, formatted like `gid://shopify/Blog/123456789`.
+3. A Shopify app Client ID and Client Secret, installed on your own store with `read_products`, `read_content`, and `write_content`.
 5. The public storefront URL (`https://legendsdtf.com`) for safe internal product links.
 
 ## Local setup
@@ -32,19 +31,7 @@ npm run dev
 
 Open `http://localhost:3000`. The browser uses HTTP Basic authentication: any username works and the password is `ADMIN_PASSWORD`.
 
-## Finding the Shopify blog ID
-
-Run this GraphQL query in Shopify's Admin API GraphiQL app:
-
-```graphql
-query BlogIds {
-  blogs(first: 20) {
-    nodes { id title handle }
-  }
-}
-```
-
-Copy the desired blog's `id` into `SHOPIFY_BLOG_ID`. After deployment, visit `/api/verify-shopify` to verify the shop and selected blog.
+The service exchanges the Client ID and Secret for a 24-hour access token and refreshes it automatically. It also discovers the store's blog automatically, preferring the standard `news` blog. After deployment, visit `/api/verify-shopify` to verify the shop and selected blog.
 
 ## Railway deployment
 
@@ -57,7 +44,7 @@ Copy the desired blog's `id` into `SHOPIFY_BLOG_ID`. After deployment, visit `/a
 
 ## Operational safety
 
-- Keep `OPENAI_API_KEY`, `SHOPIFY_ADMIN_ACCESS_TOKEN`, and `ADMIN_PASSWORD` only in Railway variables.
+- Keep `OPENAI_API_KEY`, `SHOPIFY_CLIENT_SECRET`, and `ADMIN_PASSWORD` only in Railway variables.
 - Use a long random `ADMIN_PASSWORD`; the config requires at least 12 characters.
 - The service defaults to one daily post at 9:00 AM ET and remains paused until explicitly enabled.
 - To stop publication immediately, uncheck **Automatic publishing enabled**. Jobs already claimed as `running` may finish.
