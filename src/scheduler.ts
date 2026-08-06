@@ -19,6 +19,7 @@ import { generateArticle } from "./writer.js";
 import { getProductLinks, publishArticle, ShopifyError } from "./shopify.js";
 import type { GeneratedArticle, Settings } from "./types.js";
 import { toGenerated } from "./content.js";
+import { authorizeAutomaticPublication } from "./autopilot/authorizePublish.js";
 import {
   canAutoPublish,
   canRunResearch,
@@ -172,6 +173,8 @@ export class AutopilotWorker {
 
     let article: GeneratedArticle | null = null;
     let articleId = job.article_id ? Number(job.article_id) : null;
+    const isManualJob =
+      String(job.slot_key).startsWith("manual:") || String(job.slot_key).startsWith("article:");
 
     try {
       // Existing article path (edit/schedule/publish-now)
@@ -183,33 +186,32 @@ export class AutopilotWorker {
 
         // Already linked: update via articleUpdate (never create again).
         if (existing.shopifyArticleId) {
-          const frequency = await canPublishUnderFrequencyLimits(this.db, settings);
-          if (!frequency.ok && canAutoPublish(settings.rolloutMode) && !String(job.slot_key).startsWith("manual:")) {
-            await this.db.query(
-              `UPDATE publish_jobs SET status='skipped', error=$2, completed_at=now(), updated_at=now() WHERE id=$1`,
-              [job.id, frequency.reason || "Frequency limit"]
-            );
-            return;
-          }
-
-          if (recordsShadowDecision(settings.rolloutMode) || settings.draftOnlyMode || !canAutoPublish(settings.rolloutMode)) {
-            await recordAudit(this.db, {
-              actor: "scheduler",
-              action: "shadow_auto_decision",
+          if (!isManualJob) {
+            const auth = await authorizeAutomaticPublication({
+              db: this.db,
+              settings,
               articleId,
-              jobId: job.id,
-              detail: {
-                wouldPublish: true,
-                mode: settings.rolloutMode,
-                shopifyArticleId: existing.shopifyArticleId,
-                reason: "Existing Shopify article would be updated under AUTO_PUBLISH."
-              }
+              shadowEvaluation: recordsShadowDecision(settings.rolloutMode)
             });
-            await this.db.query(
-              `UPDATE publish_jobs SET status='skipped', article=$2::jsonb, completed_at=now(), updated_at=now(), error=$3 WHERE id=$1`,
-              [job.id, JSON.stringify(article), `Rollout ${settings.rolloutMode}: recorded without publishing.`]
-            );
-            return;
+            if (!auth.ok) {
+              await recordAudit(this.db, {
+                actor: "scheduler",
+                action: recordsShadowDecision(settings.rolloutMode) ? "shadow_auto_decision" : "auto_publish_blocked",
+                articleId,
+                jobId: job.id,
+                detail: {
+                  wouldPublish: auth.wouldPublish,
+                  reasons: auth.reasons,
+                  mode: settings.rolloutMode,
+                  shopifyArticleId: existing.shopifyArticleId
+                }
+              });
+              await this.db.query(
+                `UPDATE publish_jobs SET status='skipped', article=$2::jsonb, completed_at=now(), updated_at=now(), error=$3 WHERE id=$1`,
+                [job.id, JSON.stringify(article), auth.reasons.join(" ")]
+              );
+              return;
+            }
           }
 
           const published = await publishArticle(this.config, article, settings.authorName, settings, {
@@ -230,6 +232,8 @@ export class AutopilotWorker {
           return;
         }
       } else {
+        // Legacy non-research publish-slot generator: never auto-publish.
+        // Twice-daily Autopilot articles must come from executeScheduledResearchCycle.
         const { products, warning } = await getProductLinks(this.config, settings.storefrontUrl);
         if (warning) console.warn(JSON.stringify({ event: "product_access_warning", warning }));
         const recentTopics = await recentTopicContext(this.db);
@@ -245,44 +249,32 @@ export class AutopilotWorker {
         if (duplicate) throw new Error(`Duplicate topic fingerprint: ${article.topicFingerprint}`);
 
         const created = await createArticleFromGenerated(this.db, article, {
-          status: settings.draftOnlyMode || recordsShadowDecision(settings.rolloutMode) ? "ready" : "publishing",
+          status: "ready",
           source: "autopilot",
-          author: settings.authorName
+          author: settings.authorName,
+          generationSettings: { researchPipeline: false, legacyPublishSlot: true }
         });
         articleId = created.id;
         await this.db.query("UPDATE publish_jobs SET article_id=$2, updated_at=now() WHERE id=$1", [job.id, articleId]);
-
-        if (settings.draftOnlyMode || recordsShadowDecision(settings.rolloutMode) || !canAutoPublish(settings.rolloutMode)) {
-          await updateArticle(this.db, articleId, { status: "ready" });
-          if (recordsShadowDecision(settings.rolloutMode)) {
-            await recordAudit(this.db, {
-              actor: "scheduler",
-              action: "shadow_auto_decision",
-              articleId,
-              jobId: job.id,
-              detail: {
-                wouldPublish: false,
-                mode: "shadow_auto",
-                reason: "SHADOW_AUTO keeps drafts; would evaluate AUTO_PUBLISH gates before live publish."
-              }
-            });
+        await this.db.query(
+          `UPDATE publish_jobs SET status='skipped', article=$2::jsonb, completed_at=now(), updated_at=now(), error=$3 WHERE id=$1`,
+          [job.id, JSON.stringify(article), "Legacy publish-slot generator cannot auto-publish; use research pipeline."]
+        );
+        await recordAudit(this.db, {
+          actor: "scheduler",
+          action: "article_generated_draft_only",
+          articleId,
+          jobId: job.id,
+          detail: {
+            title: article.title,
+            mode: settings.rolloutMode,
+            reason: "Legacy slot generator is draft-only; gated research cycle owns Autopilot articles."
           }
-          await this.db.query(
-            `UPDATE publish_jobs SET status='skipped', article=$2::jsonb, completed_at=now(), updated_at=now(), error=$3 WHERE id=$1`,
-            [job.id, JSON.stringify(article), "Draft-only / shadow mode: article generated and saved without publishing."]
-          );
-          await recordAudit(this.db, {
-            actor: "scheduler",
-            action: "article_generated_draft_only",
-            articleId,
-            jobId: job.id,
-            detail: { title: article.title, mode: settings.rolloutMode }
-          });
-          return;
-        }
+        });
+        return;
       }
 
-      if (!article) throw new Error("No article payload for publish job");
+      if (!article || !articleId) throw new Error("No article payload for publish job");
 
       if (this.publishedThisTick >= settings.frequencyLimits.maxArticlesPerCycle) {
         await this.db.query(
@@ -292,23 +284,39 @@ export class AutopilotWorker {
         return;
       }
 
-      const frequency = await canPublishUnderFrequencyLimits(this.db, settings);
-      if (!frequency.ok) {
-        await recordAudit(this.db, {
-          actor: "scheduler",
-          action: "publish_skipped_frequency",
-          articleId: articleId ?? undefined,
-          jobId: job.id,
-          detail: { reason: frequency.reason }
+      // Fail-closed authorization at the publication boundary (automatic jobs only).
+      if (!isManualJob) {
+        const auth = await authorizeAutomaticPublication({
+          db: this.db,
+          settings,
+          articleId
         });
-        await this.db.query(
-          `UPDATE publish_jobs SET status='skipped', completed_at=now(), updated_at=now(), error=$2 WHERE id=$1`,
-          [job.id, frequency.reason || "Frequency limit"]
-        );
-        return;
+        if (!auth.ok) {
+          await recordAudit(this.db, {
+            actor: "scheduler",
+            action: "auto_publish_blocked",
+            articleId,
+            jobId: job.id,
+            detail: { reasons: auth.reasons, mode: settings.rolloutMode }
+          });
+          await this.db.query(
+            `UPDATE publish_jobs SET status='skipped', completed_at=now(), updated_at=now(), error=$2 WHERE id=$1`,
+            [job.id, auth.reasons.join(" ")]
+          );
+          return;
+        }
+      } else {
+        const frequency = await canPublishUnderFrequencyLimits(this.db, settings);
+        if (!frequency.ok && canAutoPublish(settings.rolloutMode)) {
+          await this.db.query(
+            `UPDATE publish_jobs SET status='skipped', completed_at=now(), updated_at=now(), error=$2 WHERE id=$1`,
+            [job.id, frequency.reason || "Frequency limit"]
+          );
+          return;
+        }
       }
 
-      const existingLocal = articleId ? await getArticle(this.db, articleId) : null;
+      const existingLocal = await getArticle(this.db, articleId);
       const published = await publishArticle(this.config, article, settings.authorName, settings, {
         imageUrl: existingLocal?.featuredImageUrl ?? null,
         imageAlt: existingLocal?.featuredImageAlt ?? null,
