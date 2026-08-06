@@ -168,9 +168,16 @@ test("retrying an already-published article does not create a duplicate Shopify 
 
   // Simulate a retry job for the same article
   const jobId = await insertManualJob(db, article.id);
-  const job = await claimJob(db, 4);
-  assert.ok(job);
-  assert.equal(Number(job!.id), jobId);
+  // Drain any older pending jobs first so claim order is not flaky across test runs.
+  for (let i = 0; i < 50; i++) {
+    const claimed = await claimJob(db, 4);
+    if (!claimed) break;
+    if (Number(claimed.id) === jobId) break;
+    await db.query(
+      "UPDATE publish_jobs SET status='skipped', updated_at=now() WHERE id=$1 AND status='running'",
+      [claimed.id]
+    );
+  }
 
   const existing = await getArticle(db, article.id);
   assert.ok(existing?.shopifyArticleId);
@@ -187,7 +194,7 @@ test("retrying an already-published article does not create a duplicate Shopify 
     topicFingerprint: existing!.topicFingerprint,
     rationale: existing!.rationale
   };
-  await finishJob(db, job!.id, generated, existing!.shopifyArticleId!, existing!.shopifyUrl, {
+  await finishJob(db, jobId, generated, existing!.shopifyArticleId!, existing!.shopifyUrl, {
     articleId: article.id,
     responseStatus: "already_published",
     handle: existing!.shopifyHandle

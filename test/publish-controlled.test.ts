@@ -117,8 +117,9 @@ test("publishArticle response mapping leaves URL null when Shopify omits handles
     rationale: "Regression for Shopify-omitted handles."
   };
 
+  const shopifyId = `gid://shopify/Article/${Date.now()}123`;
   const created = {
-    id: "gid://shopify/Article/123",
+    id: shopifyId,
     handle: null,
     blog: { id: "gid://shopify/Blog/1", handle: null }
   };
@@ -131,7 +132,7 @@ test("publishArticle response mapping leaves URL null when Shopify omits handles
     idempotencyKey: "test:null-handles"
   });
 
-  assert.equal(published.id, "gid://shopify/Article/123");
+  assert.equal(published.id, shopifyId);
   assert.equal(published.handle, null);
   assert.equal(published.blogHandle, null);
   assert.equal(published.url, null);
@@ -141,7 +142,7 @@ test("publishArticle response mapping leaves URL null when Shopify omits handles
   await migrate(db);
   const record = await createArticle(db, {
     title: localArticle.title,
-    handle: localArticle.handle,
+    handle: `${localArticle.handle}-${Date.now()}`,
     excerpt: localArticle.summary,
     metaTitle: localArticle.title,
     metaDescription: localArticle.metaDescription,
@@ -167,7 +168,7 @@ test("publishArticle response mapping leaves URL null when Shopify omits handles
   const saved = await getArticle(db, record.id);
   assert.ok(saved);
   assert.equal(saved!.status, "published");
-  assert.equal(saved!.shopifyArticleId, "gid://shopify/Article/123");
+  assert.equal(saved!.shopifyArticleId, shopifyId);
   assert.equal(saved!.shopifyUrl, null);
   assert.equal(settings.enabled, false);
   assert.equal(settings.draftOnlyMode, true);
