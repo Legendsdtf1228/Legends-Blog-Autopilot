@@ -113,7 +113,7 @@ export class AutopilotWorker {
         if (existing.status === "archived") throw new Error("Article is archived");
         if (existing.shopifyArticleId) {
           // Idempotent: already published
-          await finishJob(this.db, job.id, toGenerated(existing), existing.shopifyArticleId, existing.shopifyUrl || "", {
+          await finishJob(this.db, job.id, toGenerated(existing), existing.shopifyArticleId, existing.shopifyUrl, {
             articleId,
             blogId: existing.shopifyBlogId || undefined,
             handle: existing.shopifyHandle || existing.handle,
@@ -171,7 +171,7 @@ export class AutopilotWorker {
 
       await finishJob(this.db, job.id, article, published.id, published.url, {
         articleId: articleId ?? undefined,
-        blogId: published.blogId,
+        blogId: published.blogId ?? undefined,
         handle: published.handle,
         responseStatus: published.responseStatus
       });
