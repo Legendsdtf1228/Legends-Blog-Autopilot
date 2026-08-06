@@ -73,6 +73,7 @@ import {
   latestCycleMeta,
   listOpportunities,
   listPillarUsage,
+  IncompleteInventoryError,
   loadContentInventory,
   markOpportunityStatus,
   qualityGatesPassed,
@@ -336,6 +337,11 @@ app.post("/research/run", async (req: AuthedRequest, res) => {
   }
   try {
     const inventory = await loadContentInventory({ db, config, settings });
+    if (inventory.counts.truncated) {
+      return res.redirect("/research?error=" + encodeURIComponent(
+        "Content inventory is incomplete (truncated). Topic research aborted until the full inventory can be loaded."
+      ));
+    }
     const usage = await listPillarUsage(db, 60);
     const result = await runResearchCycle({
       products: inventory.products,
@@ -380,7 +386,9 @@ app.post("/research/run", async (req: AuthedRequest, res) => {
       : undefined;
     res.redirect(`/research/briefs/${brief.id}${notice ? `?notice=${encodeURIComponent(notice)}` : ""}`);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = error instanceof IncompleteInventoryError
+      ? error.message
+      : error instanceof Error ? error.message : String(error);
     res.redirect("/research?error=" + encodeURIComponent(message));
   }
 });
@@ -424,6 +432,11 @@ app.post("/research/custom", async (req: AuthedRequest, res) => {
   }
   try {
     const inventory = await loadContentInventory({ db, config, settings });
+    if (inventory.counts.truncated) {
+      return res.redirect("/research?error=" + encodeURIComponent(
+        "Content inventory is incomplete (truncated). Custom topic approval aborted until the full inventory can be loaded."
+      ));
+    }
     const evaluated = evaluateCustomTopic(topic, {
       businessFacts: settings.facts,
       existingArticles: inventory.existing,
@@ -451,7 +464,9 @@ app.post("/research/custom", async (req: AuthedRequest, res) => {
     }
     res.redirect(`/research/briefs/${brief.id}`);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = error instanceof IncompleteInventoryError
+      ? error.message
+      : error instanceof Error ? error.message : String(error);
     res.redirect("/research?error=" + encodeURIComponent(message));
   }
 });

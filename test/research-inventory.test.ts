@@ -19,6 +19,12 @@ import {
 } from "../src/research/index.js";
 import type { ExistingArticleRef } from "../src/research/overlap.js";
 import type { ResearchOpportunity } from "../src/research/types.js";
+import {
+  assertShopifyInventoryComplete,
+  IncompleteInventoryError,
+  RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT,
+  RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT
+} from "../src/shopify.js";
 
 const databaseUrl = process.env.DATABASE_URL || "postgresql://legends:legends@localhost:5432/legends_blog";
 const now = new Date("2026-08-06T18:00:00.000Z");
@@ -44,6 +50,81 @@ async function seedArticle(
     rationale: "inventory test"
   }, { status: opts.status ?? "draft", source: "test" });
 }
+
+test("Shopify product hard limit throws incomplete-inventory error instead of silent truncate", () => {
+  assert.equal(RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT, 2000);
+  assert.doesNotThrow(() => assertShopifyInventoryComplete({
+    kind: "products",
+    loaded: RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT,
+    hasNextPage: false,
+    hardLimit: RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT
+  }));
+  assert.throws(
+    () => assertShopifyInventoryComplete({
+      kind: "products",
+      loaded: RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT,
+      hasNextPage: true,
+      hardLimit: RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof IncompleteInventoryError);
+      assert.equal(error.kind, "products");
+      assert.equal(error.truncated, true);
+      assert.equal(error.loaded, 2000);
+      assert.equal(error.hardLimit, 2000);
+      assert.match(error.message, /products inventory incomplete/i);
+      assert.match(error.message, /Duplicate detection aborted/i);
+      return true;
+    }
+  );
+  // Injected lower hard limit (same guard used by pagination loops)
+  assert.throws(
+    () => assertShopifyInventoryComplete({
+      kind: "products",
+      loaded: 2,
+      hasNextPage: true,
+      hardLimit: 2
+    }),
+    IncompleteInventoryError
+  );
+});
+
+test("Shopify article hard limit throws incomplete-inventory error instead of silent truncate", () => {
+  assert.equal(RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT, 5000);
+  assert.doesNotThrow(() => assertShopifyInventoryComplete({
+    kind: "articles",
+    loaded: RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT,
+    hasNextPage: false,
+    hardLimit: RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT
+  }));
+  assert.throws(
+    () => assertShopifyInventoryComplete({
+      kind: "articles",
+      loaded: RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT,
+      hasNextPage: true,
+      hardLimit: RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof IncompleteInventoryError);
+      assert.equal(error.kind, "articles");
+      assert.equal(error.truncated, true);
+      assert.equal(error.loaded, 5000);
+      assert.equal(error.hardLimit, 5000);
+      assert.match(error.message, /articles inventory incomplete/i);
+      assert.match(error.message, /Duplicate detection aborted/i);
+      return true;
+    }
+  );
+  assert.throws(
+    () => assertShopifyInventoryComplete({
+      kind: "articles",
+      loaded: 3,
+      hasNextPage: true,
+      hardLimit: 3
+    }),
+    IncompleteInventoryError
+  );
+});
 
 test("custom duplicate topic is blocked; distinct angle is accepted", () => {
   const existing: ExistingArticleRef[] = [{

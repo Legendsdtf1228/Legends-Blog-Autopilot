@@ -136,15 +136,61 @@ export async function resolveBlog(config: AppConfig, settings: Settings): Promis
   return selected;
 }
 
+/** Hard caps prevent unbounded memory use; exceeding them with more pages available is an incomplete inventory. */
+export const RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT = 2000;
+export const RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT = 5000;
+
+export class IncompleteInventoryError extends Error {
+  readonly truncated = true as const;
+
+  constructor(
+    message: string,
+    public readonly kind: "products" | "articles",
+    public readonly loaded: number,
+    public readonly hardLimit: number
+  ) {
+    super(message);
+    this.name = "IncompleteInventoryError";
+  }
+}
+
+/** Throw when a Shopify pagination hard limit would silently truncate overlap inventory. */
+export function assertShopifyInventoryComplete(args: {
+  kind: "products" | "articles";
+  loaded: number;
+  hasNextPage: boolean;
+  hardLimit: number;
+}): void {
+  if (args.hasNextPage && args.loaded >= args.hardLimit) {
+    throw new IncompleteInventoryError(
+      `Shopify ${args.kind} inventory incomplete: loaded ${args.loaded} of at least ${args.loaded + 1}+ records ` +
+        `(hard limit ${args.hardLimit}) but more pages remain. Duplicate detection aborted.`,
+      args.kind,
+      args.loaded,
+      args.hardLimit
+    );
+  }
+}
+
 export async function getProductLinks(config: AppConfig, storefrontUrl?: string): Promise<{ products: ProductLink[]; warning?: string }> {
-  return getResearchProducts(config, storefrontUrl);
+  // Same completeness rules as research inventory — never silently truncate a capped catalog.
+  return getResearchProducts(config, storefrontUrl, { incompleteBehavior: "throw" });
+}
+
+export interface ResearchProductFetchOptions {
+  hardLimit?: number;
+  /** Default `throw` — overlap inventory must not silently truncate. */
+  incompleteBehavior?: "throw" | "error_result";
 }
 
 /** Paginated Shopify product fetch with description, type, and options for locked fact sheets. */
 export async function getResearchProducts(
   config: AppConfig,
-  storefrontUrl?: string
-): Promise<{ products: ProductLink[]; warning?: string }> {
+  storefrontUrl?: string,
+  opts?: ResearchProductFetchOptions
+): Promise<{ products: ProductLink[]; warning?: string; truncated?: boolean }> {
+  const hardLimit = opts?.hardLimit ?? RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT;
+  const incompleteBehavior = opts?.incompleteBehavior ?? "throw";
   const base = (storefrontUrl || config.STOREFRONT_URL).replace(/\/$/, "");
   const retrievedAt = new Date().toISOString();
   try {
@@ -200,10 +246,23 @@ export async function getResearchProducts(
       }
       hasNext = Boolean(data.products.pageInfo.hasNextPage && data.products.pageInfo.endCursor);
       cursor = data.products.pageInfo.endCursor ?? null;
-      if (products.length > 2000) break; // safety cap
+      try {
+        assertShopifyInventoryComplete({
+          kind: "products",
+          loaded: products.length,
+          hasNextPage: hasNext,
+          hardLimit
+        });
+      } catch (error) {
+        if (error instanceof IncompleteInventoryError && incompleteBehavior === "error_result") {
+          return { products, truncated: true, warning: error.message };
+        }
+        throw error;
+      }
     }
-    return { products };
+    return { products, truncated: false };
   } catch (error) {
+    if (error instanceof IncompleteInventoryError) throw error;
     if (error instanceof ShopifyError && (error.code === "permission" || error.code === "auth")) {
       return {
         products: [],
@@ -224,11 +283,19 @@ export interface ShopifyBlogArticleRef {
   url: string | null;
 }
 
+export interface ResearchArticleFetchOptions {
+  hardLimit?: number;
+  incompleteBehavior?: "throw" | "error_result";
+}
+
 /** Paginate all articles from a Shopify blog for overlap/cannibalization checks. */
 export async function listAllShopifyBlogArticles(
   config: AppConfig,
-  args: { blogId: string; blogHandle: string; storefrontUrl: string }
-): Promise<{ articles: ShopifyBlogArticleRef[]; warning?: string }> {
+  args: { blogId: string; blogHandle: string; storefrontUrl: string },
+  opts?: ResearchArticleFetchOptions
+): Promise<{ articles: ShopifyBlogArticleRef[]; warning?: string; truncated?: boolean }> {
+  const hardLimit = opts?.hardLimit ?? RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT;
+  const incompleteBehavior = opts?.incompleteBehavior ?? "throw";
   const base = normalizeStorefrontUrl(args.storefrontUrl);
   try {
     const articles: ShopifyBlogArticleRef[] = [];
@@ -274,10 +341,23 @@ export async function listAllShopifyBlogArticles(
       }
       hasNext = Boolean(data.blog?.articles.pageInfo.hasNextPage && data.blog.articles.pageInfo.endCursor);
       cursor = data.blog?.articles.pageInfo.endCursor ?? null;
-      if (articles.length > 5000) break;
+      try {
+        assertShopifyInventoryComplete({
+          kind: "articles",
+          loaded: articles.length,
+          hasNextPage: hasNext,
+          hardLimit
+        });
+      } catch (error) {
+        if (error instanceof IncompleteInventoryError && incompleteBehavior === "error_result") {
+          return { articles, truncated: true, warning: error.message };
+        }
+        throw error;
+      }
     }
-    return { articles };
+    return { articles, truncated: false };
   } catch (error) {
+    if (error instanceof IncompleteInventoryError) throw error;
     if (error instanceof ShopifyError && (error.code === "permission" || error.code === "auth")) {
       return {
         articles: [],

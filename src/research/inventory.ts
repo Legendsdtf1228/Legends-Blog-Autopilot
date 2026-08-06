@@ -4,12 +4,15 @@ import { listArticles } from "../db.js";
 import type { ProductLink, Settings } from "../types.js";
 import {
   getResearchProducts,
+  IncompleteInventoryError,
   listAllShopifyBlogArticles,
   resolveBlog,
   ShopifyError
 } from "../shopify.js";
 import type { ExistingArticleRef } from "./overlap.js";
 import type { FeaturedProduct } from "./types.js";
+
+export { IncompleteInventoryError };
 
 export interface ContentInventory {
   existing: ExistingArticleRef[];
@@ -22,7 +25,7 @@ export interface ContentInventory {
     reservedOpportunities: number;
     pendingBriefs: number;
     total: number;
-    truncated: false;
+    truncated: boolean;
   };
 }
 
@@ -185,10 +188,21 @@ export async function loadContentInventory(args: {
 
   let products: FeaturedProduct[] = [];
   try {
-    const productResult = await getResearchProducts(args.config, args.settings.storefrontUrl);
+    const productResult = await getResearchProducts(args.config, args.settings.storefrontUrl, {
+      incompleteBehavior: "throw"
+    });
+    if (productResult.truncated) {
+      throw new IncompleteInventoryError(
+        productResult.warning || "Shopify product inventory was truncated.",
+        "products",
+        productResult.products.length,
+        productResult.products.length
+      );
+    }
     products = productLinksToFeatured(productResult.products);
     if (productResult.warning) warnings.push(productResult.warning);
   } catch (error) {
+    if (error instanceof IncompleteInventoryError) throw error;
     warnings.push(error instanceof Error ? error.message : "Product inventory failed");
   }
 
@@ -199,7 +213,15 @@ export async function loadContentInventory(args: {
       blogId: blog.id,
       blogHandle: blog.handle,
       storefrontUrl: args.settings.storefrontUrl
-    });
+    }, { incompleteBehavior: "throw" });
+    if (articleResult.truncated) {
+      throw new IncompleteInventoryError(
+        articleResult.warning || "Shopify blog article inventory was truncated.",
+        "articles",
+        articleResult.articles.length,
+        articleResult.articles.length
+      );
+    }
     if (articleResult.warning) warnings.push(articleResult.warning);
     shopifyArticles = articleResult.articles.map(a => ({
       id: null,
@@ -214,6 +236,7 @@ export async function loadContentInventory(args: {
       url: a.url
     }));
   } catch (error) {
+    if (error instanceof IncompleteInventoryError) throw error;
     if (error instanceof ShopifyError) {
       warnings.push(error.message);
     } else {
