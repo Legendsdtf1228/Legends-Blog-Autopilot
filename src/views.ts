@@ -1,5 +1,7 @@
 import type { ArticleRecord, OverviewStats, Settings } from "./types.js";
 import type { AppConfig } from "./config.js";
+import type { ArticleBrief, EvidenceReport, MerchantInterview, OverlapMatch, ResearchOpportunity } from "./research/types.js";
+import { AUDIENCE_LABELS, CONTENT_PILLARS, FORMAT_LABELS } from "./research/pillars.js";
 
 export const esc = (value: unknown) =>
   String(value ?? "").replace(/[&<>'"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c]!);
@@ -10,6 +12,7 @@ export const selected = (a: string, b: string) => (a === b ? "selected" : "");
 function nav(active: string) {
   const items = [
     ["/", "Overview"],
+    ["/research", "Research"],
     ["/articles", "Articles"],
     ["/articles/new", "New Article"],
     ["/schedule", "Schedule"],
@@ -24,7 +27,9 @@ function nav(active: string) {
           ? active === "/"
           : href === "/articles"
             ? active === "/articles" || /^\/articles\/\d+/.test(active)
-            : active === href || active.startsWith(`${href}/`);
+            : href === "/research"
+              ? active === "/research" || active.startsWith("/research/")
+              : active === href || active.startsWith(`${href}/`);
       return `<a href="${href}" class="${isActive ? "active" : ""}">${label}</a>`;
     })
     .join("")}</nav>`;
@@ -219,12 +224,24 @@ export function articleEditorPage(args: {
   mode: "new" | "edit";
   fieldErrors?: Array<{ field: string; message: string }>;
   csrf: string;
+  evidenceReport?: EvidenceReport | null;
 }) {
   const a = args.article;
   const err = (field: string) => args.fieldErrors?.find(e => e.field === field)?.message;
   const fieldError = (field: string) => (err(field) ? `<div class="field-error">${esc(err(field))}</div>` : "");
+  const evidence = args.evidenceReport
+    ? `<section class="card"><h3>Evidence report</h3>
+        <p class="muted">Generated ${esc(args.evidenceReport.generatedAt)}</p>
+        <ul>${args.evidenceReport.qualityGateResults.map(g => `<li>${g.ok ? "✓" : "✗"} <strong>${esc(g.gate)}</strong>: ${esc(g.detail)}</li>`).join("")}</ul>
+        <h4>Shopify facts used</h4>
+        <ul>${args.evidenceReport.shopifyFactsUsed.map(f => `<li>${esc(f)}</li>`).join("") || "<li class=\"muted\">None</li>"}</ul>
+        <h4>Sources</h4>
+        <ul>${args.evidenceReport.sourcesUsed.map(s => `<li>${esc(s.provider)} — ${esc(s.detail)} (${esc(s.collectedAt)})</li>`).join("")}</ul>
+      </section>`
+    : "";
 
   return `
+  ${evidence}
   <form method="post" action="${a ? `/articles/${a.id}` : "/articles"}" class="grid editor" id="article-form">
     <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
     <section class="card">
@@ -415,6 +432,11 @@ export function settingsPage(args: {
         <datalist id="model-list">${(args.openaiModels || []).map(m => `<option value="${esc(m)}"></option>`).join("")}</datalist>
       </label>
       <label class="toggle"><input type="checkbox" name="enableAiImages" ${checked(s.enableAiImages)}> Enable optional AI image generation</label>
+      <h3>Topic research</h3>
+      <label class="toggle"><input type="checkbox" name="researchEnabled" ${checked(s.research.enabled)}> Enable research cycles</label>
+      <label>Research region<input name="researchRegion" value="${esc(s.research.region)}"></label>
+      <label>Freshness max days<input name="researchFreshnessMaxDays" type="number" min="1" max="365" value="${esc(s.research.freshnessMaxDays)}"></label>
+      <label class="toggle"><input type="checkbox" name="researchRequireInterview" ${checked(s.research.requireInterviewForFirstPerson)}> Require merchant interview for first-person stories</label>
       <h3>Secrets (Railway only)</h3>
       <ul class="list muted">
         <li>OPENAI_API_KEY: ${secret(Boolean(args.config.OPENAI_API_KEY))}</li>
@@ -453,4 +475,182 @@ export function diagnosticsPage(args: {
       <pre class="code-block">${esc(JSON.stringify(args.scheduler, null, 2))}</pre>
     </section>
   </div>`;
+}
+
+export function researchPage(args: {
+  settings: Settings;
+  csrf: string;
+  cycle: { collectedAt: string; missingProviders: Array<{ provider: string; reason: string }>; signalCount: number } | null;
+  opportunities: ResearchOpportunity[];
+  pillars: typeof CONTENT_PILLARS;
+}) {
+  const missing = args.cycle?.missingProviders?.length
+    ? `<div class="notice">${args.cycle.missingProviders.map(m => `<div><strong>${esc(m.provider)}</strong>: ${esc(m.reason)}</div>`).join("")}</div>`
+    : `<p class="muted">No missing providers recorded yet.</p>`;
+
+  const rows = args.opportunities.slice(0, 25).map(o => `
+    <tr>
+      <td><a href="/research/opportunities/${esc(o.id)}">${esc(o.proposedTitle)}</a></td>
+      <td>${esc(o.cluster.pillar)}</td>
+      <td>${esc(o.cluster.primaryKeyword)}</td>
+      <td>${esc(AUDIENCE_LABELS[o.cluster.audience])}</td>
+      <td>${esc(FORMAT_LABELS[o.cluster.format])}</td>
+      <td>${esc(o.scores.opportunityScore.toFixed(3))}</td>
+      <td>${esc(o.status)}</td>
+      <td>${esc(o.dataCollectedLabel)}</td>
+    </tr>`).join("") || `<tr><td colspan="8" class="muted">No opportunities yet. Run a research cycle.</td></tr>`;
+
+  return `
+  <section class="card">
+    <div class="row" style="justify-content:space-between;gap:1rem;flex-wrap:wrap">
+      <div>
+        <h2>Topic research</h2>
+        <p class="muted">Search-demand opportunities across all content pillars. Draft-only until merchant review.</p>
+      </div>
+      <form method="post" action="/research/run">
+        <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+        <button class="primary" type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Run research cycle</button>
+      </form>
+    </div>
+    ${args.cycle ? `<p><strong>${esc(args.cycle.signalCount)}</strong> signals · collected ${esc(new Date(args.cycle.collectedAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>` : ""}
+    ${missing}
+  </section>
+  <section class="card">
+    <h3>Approved content pillars</h3>
+    <ul>${args.pillars.map(p => `<li><strong>${esc(p.label)}</strong> — ${esc(p.subcategories.slice(0, 3).join(", "))}</li>`).join("")}</ul>
+    <p class="muted">Target balance: DTF 25% · Garment 20% · Design 15% · Business 15% · Entrepreneurship 15% · Story 10% (configurable in settings JSON).</p>
+  </section>
+  <section class="card">
+    <h3>Ranked opportunities</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Topic</th><th>Pillar</th><th>Keyword</th><th>Audience</th><th>Format</th><th>Score</th><th>Status</th><th>Data freshness</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </section>
+  <section class="card">
+    <h3>Enter my own topic</h3>
+    <form method="post" action="/research/custom" class="stack">
+      <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+      <label>Topic<input name="topic" required placeholder="e.g. Cotton vs polyester for school spirit wear"></label>
+      <div class="actions"><button type="submit">Build brief from custom topic</button></div>
+    </form>
+  </section>`;
+}
+
+export function researchOverlapRejectedPage(args: {
+  topic: string;
+  overlap: OverlapMatch;
+  csrf: string;
+}) {
+  const match = args.overlap;
+  const link = match.url
+    ? `<a href="${esc(match.url)}" target="_blank" rel="noreferrer">${esc(match.title)}</a>`
+    : match.articleId
+      ? `<a href="/articles/${esc(match.articleId)}">${esc(match.title)}</a>`
+      : esc(match.title);
+
+  return `
+  <section class="card">
+    <h2>Topic overlaps existing content</h2>
+    <p><strong>This topic substantially overlaps an existing article.</strong></p>
+    <p>Entered topic: <em>${esc(args.topic)}</em></p>
+    <dl class="detail-list">
+      <dt>Matching content</dt><dd>${link}</dd>
+      <dt>Handle / ID</dt><dd>${esc(match.handle)}${match.shopifyArticleId ? ` · Shopify ${esc(match.shopifyArticleId)}` : ""}</dd>
+      <dt>Status / source</dt><dd>${esc(match.status)}${match.source ? ` (${esc(match.source)})` : ""}</dd>
+      <dt>Overlap score</dt><dd>${esc(String(match.score))}</dd>
+      <dt>Reason</dt><dd>${esc(match.reason)}</dd>
+    </dl>
+    <p>Refine the angle so it answers a meaningfully different question, or choose a researched opportunity instead.</p>
+    <form method="post" action="/research/custom" class="stack">
+      <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+      <label>Refined topic<input name="topic" required value="${esc(args.topic)}"></label>
+      <div class="actions">
+        <button class="primary" type="submit">Try refined topic</button>
+        <a class="ghost" href="/research">Back to research</a>
+      </div>
+    </form>
+  </section>`;
+}
+
+export function briefReviewPage(args: {
+  brief: ArticleBrief;
+  csrf: string;
+  interview?: MerchantInterview | null;
+}) {
+  const b = args.brief;
+  const interviewGate = b.requiresInterview && !args.interview?.completed
+    ? `<div class="notice error">Merchant interview answers are required before generation for this first-person / story topic.</div>
+       <p><a class="primary" href="/research/briefs/${b.id}/interview">Answer interview questions</a></p>`
+    : "";
+
+  return `
+  <section class="card">
+    <h2>Article brief</h2>
+    <p class="muted">${esc(b.dataCollectedLabel)}</p>
+    ${interviewGate}
+    <dl class="detail-list">
+      <dt>Content pillar</dt><dd>${esc(b.pillar)}</dd>
+      <dt>Target audience</dt><dd>${esc(b.targetAudienceLabel)}</dd>
+      <dt>Primary keyword</dt><dd>${esc(b.primaryKeyword)}</dd>
+      <dt>Secondary cluster</dt><dd>${esc(b.secondaryKeywords.join(", ") || "—")}</dd>
+      <dt>Search intent</dt><dd>${esc(b.searchIntent)}</dd>
+      <dt>Geographic target</dt><dd>${esc(b.geographicTarget)}</dd>
+      <dt>Demand evidence</dt><dd>${esc(b.demandEvidence)}</dd>
+      <dt>Estimated competition</dt><dd>${esc(b.estimatedCompetition)}</dd>
+      <dt>Conversion relevance</dt><dd>${esc(b.conversionRelevance)}</dd>
+      <dt>Closest existing article</dt><dd>${esc(b.closestExistingTitle || "None")}</dd>
+      <dt>Overlap score</dt><dd>${esc(String(b.overlapScore))}</dd>
+      <dt>Why distinct</dt><dd>${esc(b.whyDistinct)}</dd>
+      <dt>Proposed format</dt><dd>${esc(FORMAT_LABELS[b.format])}</dd>
+      <dt>Freshness class</dt><dd>${esc(b.freshnessClass)}</dd>
+      <dt>Interview required</dt><dd>${b.requiresInterview ? "Yes" : "No"}</dd>
+      <dt>Proposed title</dt><dd>${esc(b.proposedTitle)}</dd>
+      <dt>Proposed handle</dt><dd>${esc(b.proposedHandle)}</dd>
+      <dt>Products to feature</dt><dd>${esc(b.productsToFeature.map(p => p.title).join(", ") || "None (trust-building OK)")}</dd>
+      <dt>Internal links</dt><dd>${esc(b.internalLinks.join(", ") || "—")}</dd>
+      <dt>External sources</dt><dd>${esc(b.externalSources.map(s => s.url).join(", ") || "—")}</dd>
+      <dt>Opportunity score</dt><dd>${esc(String(b.scores.opportunityScore))}</dd>
+    </dl>
+    <h3>Proposed outline</h3>
+    <ol>${b.proposedOutline.map(item => `<li>${esc(item)}</li>`).join("")}</ol>
+    <h3>Locked fact sheet</h3>
+    <ul>${[...b.factSheet.businessFacts, ...b.factSheet.productFacts].map(f => `<li>${esc(f)}</li>`).join("") || "<li class=\"muted\">No product facts locked</li>"}</ul>
+    <p class="muted">${esc(b.factSheet.reviewFlags.join(" · "))}</p>
+    <div class="actions" style="flex-wrap:wrap;gap:.5rem">
+      <form method="post" action="/research/briefs/${b.id}/approve-generate">
+        <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+        <button class="primary" type="submit" ${b.requiresInterview && !args.interview?.completed ? "disabled" : ""}>Approve and Generate</button>
+      </form>
+      <form method="post" action="/research/briefs/${b.id}/choose-another">
+        <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+        <button type="submit">Choose Another Opportunity</button>
+      </form>
+      <a class="ghost" href="/research">Back to research</a>
+    </div>
+  </section>`;
+}
+
+export function interviewPage(args: {
+  brief: ArticleBrief;
+  interview: MerchantInterview;
+  csrf: string;
+}) {
+  const fields = args.interview.questions.map(q => `
+    <label>${esc(q.question)}
+      <textarea name="${esc(q.id)}" rows="3" required minlength="8">${esc(q.answer || "")}</textarea>
+    </label>`).join("");
+
+  return `
+  <section class="card">
+    <h2>Merchant interview</h2>
+    <p>Answer from real experience only. These answers become the locked source material for “${esc(args.brief.proposedTitle)}”. Do not invent details.</p>
+    <form method="post" action="/research/briefs/${args.brief.id}/interview" class="stack">
+      <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+      ${fields}
+      <div class="actions"><button class="primary" type="submit">Save interview answers</button></div>
+    </form>
+  </section>`;
 }

@@ -3,6 +3,8 @@ import { z } from "zod";
 import type { GeneratedArticle, GenerationSettings, ProductLink, Settings } from "./types.js";
 import { prepareGeneratedArticle, toGenerated } from "./content.js";
 import { CONTENT_LIMITS } from "./defaults.js";
+import type { ArticleBrief } from "./research/types.js";
+import { FORMAT_LABELS } from "./research/pillars.js";
 
 const articleSchema = z.object({
   title: z.string().min(10).max(200),
@@ -108,23 +110,48 @@ export async function generateArticle(args: {
   products: ProductLink[];
   recentTopics: string[];
   generation?: GenerationSettings;
+  brief?: ArticleBrief;
   section?: "full" | "title" | "excerpt" | "seo" | "body";
   existing?: GeneratedArticle;
 }): Promise<GeneratedArticle> {
-  const { apiKey, model, settings, products, recentTopics, generation, section = "full", existing } = args;
+  const { apiKey, model, settings, products, recentTopics, generation, brief, section = "full", existing } = args;
   const client = new OpenAI({ apiKey });
+
+  const briefRules = brief
+    ? `
+Approved research brief controls this draft:
+- Preserve the approved topic and primary keyword exactly in spirit: "${brief.primaryKeyword}".
+- Proposed title to honor (you may tighten for SEO, not change subject): ${brief.proposedTitle}
+- Proposed handle preference: ${brief.proposedHandle}
+- Format: ${FORMAT_LABELS[brief.format]}
+- Search intent: ${brief.searchIntent}
+- Audience: ${brief.targetAudienceLabel}
+- Outline to cover: ${brief.proposedOutline.join(" | ")}
+- Locked product facts (do not contradict; do not invent beyond these): ${brief.factSheet.productFacts.join(" || ") || "none"}
+- Locked business facts: ${brief.factSheet.businessFacts.join(" || ")}
+- Prohibited: ${brief.factSheet.prohibitedClaims.join(" || ")}
+- Review flags: ${brief.factSheet.reviewFlags.join(" || ") || "none"}
+- Color psychology: never present cultural associations as universal scientific facts or guaranteed sales lifts.
+- First-person entrepreneurship: use only confirmed merchant interview answers / business facts; never invent personal stories, revenue, hardships, employees, or milestones.
+- Trust-building articles may omit hard product pitches when productsToFeature is empty.
+- Meta description ~145–160 characters, include primary keyword naturally, no invented guarantees/pricing/turnaround.
+- Also return secondary keywords naturally in tags when helpful; keep body free of stuffing.
+Draft-only safety: do not imply the article is already published.`
+    : "";
 
   const instructions = `You are the senior content editor for ${settings.businessName}. Write accurate Shopify blog content.
 Brand voice: ${generation?.brandVoice || settings.brandVoice}
-Target audience: ${generation?.targetAudience || settings.targetAudience}
+Target audience: ${generation?.targetAudience || brief?.targetAudienceLabel || settings.targetAudience}
 Accuracy over hype. Treat supplied business facts and product links as the only authoritative business information.
 Never invent prices, discounts, equipment specifications, turnaround promises, testimonials, statistics, certifications, policies, addresses, phone numbers, or product URLs.
+Never invent search volume, growth percentages, trends, or source dates.
 Never include customer names, orders, secrets, or private business data.
 Do not mention being AI. Avoid keyword stuffing.
 Produce semantic HTML using only p, h2, h3, ul, ol, li, strong, em, and a tags. Do not include an h1.
 Use 1–3 supplied product links naturally when relevant; use no other invented product links.
 Call to action guidance: ${generation?.callToAction || settings.defaultCta}
-Meta description MUST be ${CONTENT_LIMITS.metaDescription.min}-${CONTENT_LIMITS.metaDescription.max} characters.`;
+Meta description MUST be ${CONTENT_LIMITS.metaDescription.min}-${CONTENT_LIMITS.metaDescription.max} characters.
+${briefRules}`;
 
   const sectionNote =
     section === "title" ? "Regenerate only title, handle, primaryKeyword, topicFingerprint, and rationale. Keep other fields identical to existing."
@@ -137,19 +164,38 @@ Meta description MUST be ${CONTENT_LIMITS.metaDescription.min}-${CONTENT_LIMITS.
     date: new Date().toISOString().slice(0, 10),
     section,
     sectionNote,
-    articleType: generation?.articleType || "educational guide",
-    topic: generation?.topic || null,
-    primaryKeyword: generation?.primaryKeyword || settings.primaryKeywordDefault,
-    secondaryKeywords: generation?.secondaryKeywords || settings.secondaryKeywordsDefault,
+    articleType: generation?.articleType || (brief ? FORMAT_LABELS[brief.format] : "educational guide"),
+    topic: generation?.topic || brief?.proposedTitle || null,
+    primaryKeyword: generation?.primaryKeyword || brief?.primaryKeyword || settings.primaryKeywordDefault,
+    secondaryKeywords: generation?.secondaryKeywords || brief?.secondaryKeywords || settings.secondaryKeywordsDefault,
     desiredWords: lengthHint(settings, generation),
-    businessFacts: settings.facts,
+    businessFacts: brief?.factSheet.businessFacts?.length ? brief.factSheet.businessFacts : settings.facts,
+    lockedFactSheet: brief?.factSheet ?? null,
+    researchBrief: brief
+      ? {
+          pillar: brief.pillar,
+          audience: brief.audience,
+          format: brief.format,
+          searchIntent: brief.searchIntent,
+          geographicTarget: brief.geographicTarget,
+          demandEvidence: brief.demandEvidence,
+          dataCollectedLabel: brief.dataCollectedLabel,
+          outline: brief.proposedOutline,
+          productsToFeature: brief.productsToFeature,
+          internalLinks: brief.internalLinks,
+          externalSources: brief.externalSources,
+          freshnessClass: brief.freshnessClass,
+          requiresInterview: brief.requiresInterview,
+          whyDistinct: brief.whyDistinct
+        }
+      : null,
     contentPillars: settings.contentPillars,
     availableProductLinks: products.map(p => ({ title: p.title, url: p.url })),
-    productFocus: generation?.productFocus || [],
+    productFocus: generation?.productFocus || brief?.productsToFeature.map(p => p.title) || [],
     internalLinking: generation?.internalLinking !== false,
     recentTopicsToAvoid: recentTopics,
     existingArticle: existing || null,
-    draftOnly: generation?.draftOnly ?? settings.draftOnlyMode
+    draftOnly: generation?.draftOnly ?? settings.draftOnlyMode ?? true
   };
 
   async function callModel(repairHint?: string) {

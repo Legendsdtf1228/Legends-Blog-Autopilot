@@ -13,9 +13,12 @@ Production-ready Shopify blogging application for **Legends DTF Prints**. It gen
 | `src/shopify.ts` | Client-credentials token, blogs/products/publish, retries, diagnostics |
 | `src/scheduler.ts` | UTC scheduling, `FOR UPDATE SKIP LOCKED` claims, pause/draft-only safety |
 | `src/db.ts` | Postgres schema/migrations, articles, jobs, audit, settings |
+| `src/research/` | Search-demand topic research, pillars, scoring, briefs, quality gates |
 | `src/views.ts` + `public/assets` | Responsive merchant dashboard |
 
 **Autopilot defaults to paused + draft-only** so deploys cannot publish until release checks pass.
+
+Topic research covers six content pillars (DTF education, garment knowledge, design/branding, apparel-business education, honest entrepreneurship, Legends story), rotates audiences/formats, and keeps generated articles draft-only pending merchant review. Missing keyword providers are reported instead of inventing metrics.
 
 ## Required environment variables
 

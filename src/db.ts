@@ -252,8 +252,85 @@ export async function migrate(db: Db): Promise<void> {
         )
     `);
 
+    await client.query(`CREATE TABLE IF NOT EXISTS research_cycles (
+      id bigserial PRIMARY KEY,
+      collected_at timestamptz NOT NULL,
+      missing_providers jsonb NOT NULL DEFAULT '[]'::jsonb,
+      signal_count integer NOT NULL DEFAULT 0,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS research_signals (
+      id bigserial PRIMARY KEY,
+      cycle_id bigint REFERENCES research_cycles(id) ON DELETE CASCADE,
+      provider text NOT NULL,
+      collected_at timestamptz NOT NULL,
+      keyword text NOT NULL,
+      payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS research_signals_cycle_idx ON research_signals(cycle_id)");
+    await client.query("CREATE INDEX IF NOT EXISTS research_signals_keyword_idx ON research_signals(keyword)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS research_opportunities (
+      id text PRIMARY KEY,
+      cycle_id bigint REFERENCES research_cycles(id) ON DELETE SET NULL,
+      payload jsonb NOT NULL,
+      status text NOT NULL DEFAULT 'suggested'
+        CHECK (status IN ('suggested','reserved','approved','rejected','used')),
+      reserved_by text,
+      reserved_until timestamptz,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS research_opportunities_status_idx ON research_opportunities(status, updated_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS article_briefs (
+      id bigserial PRIMARY KEY,
+      opportunity_id text REFERENCES research_opportunities(id) ON DELETE SET NULL,
+      payload jsonb NOT NULL,
+      status text NOT NULL DEFAULT 'pending_review'
+        CHECK (status IN ('pending_review','approved','rejected','generated')),
+      article_id bigint REFERENCES articles(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS article_briefs_status_idx ON article_briefs(status, updated_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS merchant_interviews (
+      id bigserial PRIMARY KEY,
+      brief_id bigint NOT NULL REFERENCES article_briefs(id) ON DELETE CASCADE,
+      payload jsonb NOT NULL,
+      completed boolean NOT NULL DEFAULT false,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS merchant_interviews_brief_idx ON merchant_interviews(brief_id)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS pillar_usage (
+      id bigserial PRIMARY KEY,
+      pillar text NOT NULL,
+      subcategory text NOT NULL DEFAULT '',
+      audience text NOT NULL,
+      format text NOT NULL,
+      primary_keyword text NOT NULL DEFAULT '',
+      article_id bigint REFERENCES articles(id) ON DELETE SET NULL,
+      used_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS pillar_usage_used_idx ON pillar_usage(used_at DESC)");
+    await client.query("CREATE INDEX IF NOT EXISTS pillar_usage_pillar_idx ON pillar_usage(pillar, used_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS evidence_reports (
+      id bigserial PRIMARY KEY,
+      article_id bigint NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+      brief_id bigint REFERENCES article_briefs(id) ON DELETE SET NULL,
+      payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS evidence_reports_article_idx ON evidence_reports(article_id, created_at DESC)");
+
     await client.query(
-      `INSERT INTO schema_migrations(id) VALUES ('001_initial'), ('002_articles_audit'), ('003_sessions')
+      `INSERT INTO schema_migrations(id) VALUES
+        ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research')
        ON CONFLICT DO NOTHING`
     );
 

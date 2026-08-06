@@ -136,48 +136,232 @@ export async function resolveBlog(config: AppConfig, settings: Settings): Promis
   return selected;
 }
 
+/** Hard caps prevent unbounded memory use; exceeding them with more pages available is an incomplete inventory. */
+export const RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT = 2000;
+export const RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT = 5000;
+
+export class IncompleteInventoryError extends Error {
+  readonly truncated = true as const;
+
+  constructor(
+    message: string,
+    public readonly kind: "products" | "articles",
+    public readonly loaded: number,
+    public readonly hardLimit: number
+  ) {
+    super(message);
+    this.name = "IncompleteInventoryError";
+  }
+}
+
+/** Throw when a Shopify pagination hard limit would silently truncate overlap inventory. */
+export function assertShopifyInventoryComplete(args: {
+  kind: "products" | "articles";
+  loaded: number;
+  hasNextPage: boolean;
+  hardLimit: number;
+}): void {
+  if (args.hasNextPage && args.loaded >= args.hardLimit) {
+    throw new IncompleteInventoryError(
+      `Shopify ${args.kind} inventory incomplete: loaded ${args.loaded} of at least ${args.loaded + 1}+ records ` +
+        `(hard limit ${args.hardLimit}) but more pages remain. Duplicate detection aborted.`,
+      args.kind,
+      args.loaded,
+      args.hardLimit
+    );
+  }
+}
+
 export async function getProductLinks(config: AppConfig, storefrontUrl?: string): Promise<{ products: ProductLink[]; warning?: string }> {
+  // Same completeness rules as research inventory — never silently truncate a capped catalog.
+  return getResearchProducts(config, storefrontUrl, { incompleteBehavior: "throw" });
+}
+
+export interface ResearchProductFetchOptions {
+  hardLimit?: number;
+  /** Default `throw` — overlap inventory must not silently truncate. */
+  incompleteBehavior?: "throw" | "error_result";
+}
+
+/** Paginated Shopify product fetch with description, type, and options for locked fact sheets. */
+export async function getResearchProducts(
+  config: AppConfig,
+  storefrontUrl?: string,
+  opts?: ResearchProductFetchOptions
+): Promise<{ products: ProductLink[]; warning?: string; truncated?: boolean }> {
+  const hardLimit = opts?.hardLimit ?? RESEARCH_PRODUCT_INVENTORY_HARD_LIMIT;
+  const incompleteBehavior = opts?.incompleteBehavior ?? "throw";
   const base = (storefrontUrl || config.STOREFRONT_URL).replace(/\/$/, "");
+  const retrievedAt = new Date().toISOString();
   try {
-    const data = await graphql<{
-      products: {
-        nodes: Array<{
-          id: string;
-          title: string;
-          handle: string;
-          status: string;
-          featuredImage?: { url: string; altText?: string | null } | null;
-          totalInventory?: number | null;
-        }>;
-      };
-    }>(config, `
-      query ProductsForBlog($first: Int!) {
-        products(first: $first, query: "status:active", sortKey: UPDATED_AT, reverse: true) {
-          nodes {
-            id title handle status totalInventory
-            featuredImage { url altText }
+    const products: ProductLink[] = [];
+    let cursor: string | null = null;
+    let hasNext = true;
+    while (hasNext) {
+      const data: {
+        products: {
+          pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+          nodes: Array<{
+            id: string;
+            title: string;
+            handle: string;
+            status: string;
+            description?: string | null;
+            productType?: string | null;
+            featuredImage?: { url: string; altText?: string | null } | null;
+            totalInventory?: number | null;
+            options?: Array<{ name: string; values: string[] }> | null;
+          }>;
+        };
+      } = await graphql(config, `
+        query ProductsForResearch($first: Int!, $after: String) {
+          products(first: $first, after: $after, query: "status:active", sortKey: UPDATED_AT, reverse: true) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              id title handle status description productType totalInventory
+              featuredImage { url altText }
+              options { name values }
+            }
           }
         }
-      }
-    `, { first: 50 });
+      `, { first: 50, after: cursor });
 
-    const products = data.products.nodes
-      .filter(p => p.status === "ACTIVE")
-      .map(p => ({
-        id: p.id,
-        title: p.title,
-        handle: p.handle,
-        url: `${base}/products/${p.handle}`,
-        imageUrl: p.featuredImage?.url ?? null,
-        status: p.status,
-        available: (p.totalInventory ?? 1) > 0
-      }));
-    return { products };
+      for (const p of data.products.nodes.filter(n => n.status === "ACTIVE")) {
+        const optionSummary = (p.options || [])
+          .map(o => `${o.name}: ${(o.values || []).slice(0, 12).join(", ")}`)
+          .filter(Boolean);
+        products.push({
+          id: p.id,
+          title: p.title,
+          handle: p.handle,
+          url: `${base}/products/${p.handle}`,
+          imageUrl: p.featuredImage?.url ?? null,
+          status: p.status,
+          available: (p.totalInventory ?? 1) > 0,
+          description: (p.description || "").trim(),
+          productType: (p.productType || "").trim() || undefined,
+          options: optionSummary,
+          retrievedAt
+        });
+      }
+      hasNext = Boolean(data.products.pageInfo.hasNextPage && data.products.pageInfo.endCursor);
+      cursor = data.products.pageInfo.endCursor ?? null;
+      try {
+        assertShopifyInventoryComplete({
+          kind: "products",
+          loaded: products.length,
+          hasNextPage: hasNext,
+          hardLimit
+        });
+      } catch (error) {
+        if (error instanceof IncompleteInventoryError && incompleteBehavior === "error_result") {
+          return { products, truncated: true, warning: error.message };
+        }
+        throw error;
+      }
+    }
+    return { products, truncated: false };
   } catch (error) {
+    if (error instanceof IncompleteInventoryError) throw error;
     if (error instanceof ShopifyError && (error.code === "permission" || error.code === "auth")) {
       return {
         products: [],
         warning: "Product access is unavailable. Article generation will continue without product enrichment. Grant read_products and reconnect Shopify."
+      };
+    }
+    throw error;
+  }
+}
+
+export interface ShopifyBlogArticleRef {
+  id: string;
+  title: string;
+  handle: string;
+  blogHandle: string;
+  isPublished: boolean;
+  bodySummary: string;
+  url: string | null;
+}
+
+export interface ResearchArticleFetchOptions {
+  hardLimit?: number;
+  incompleteBehavior?: "throw" | "error_result";
+}
+
+/** Paginate all articles from a Shopify blog for overlap/cannibalization checks. */
+export async function listAllShopifyBlogArticles(
+  config: AppConfig,
+  args: { blogId: string; blogHandle: string; storefrontUrl: string },
+  opts?: ResearchArticleFetchOptions
+): Promise<{ articles: ShopifyBlogArticleRef[]; warning?: string; truncated?: boolean }> {
+  const hardLimit = opts?.hardLimit ?? RESEARCH_ARTICLE_INVENTORY_HARD_LIMIT;
+  const incompleteBehavior = opts?.incompleteBehavior ?? "throw";
+  const base = normalizeStorefrontUrl(args.storefrontUrl);
+  try {
+    const articles: ShopifyBlogArticleRef[] = [];
+    let cursor: string | null = null;
+    let hasNext = true;
+    while (hasNext) {
+      const data: {
+        blog: {
+          articles: {
+            pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+            nodes: Array<{
+              id: string;
+              title: string;
+              handle: string;
+              isPublished: boolean;
+              body?: string | null;
+            }>;
+          };
+        } | null;
+      } = await graphql(config, `
+        query BlogArticlesForResearch($blogId: ID!, $first: Int!, $after: String) {
+          blog(id: $blogId) {
+            articles(first: $first, after: $after) {
+              pageInfo { hasNextPage endCursor }
+              nodes { id title handle isPublished body }
+            }
+          }
+        }
+      `, { blogId: args.blogId, first: 50, after: cursor });
+
+      const nodes = data.blog?.articles.nodes || [];
+      for (const a of nodes) {
+        const summary = (a.body || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 400);
+        articles.push({
+          id: a.id,
+          title: a.title,
+          handle: a.handle,
+          blogHandle: args.blogHandle,
+          isPublished: a.isPublished,
+          bodySummary: summary,
+          url: a.handle ? `${base}/blogs/${args.blogHandle}/${a.handle}` : null
+        });
+      }
+      hasNext = Boolean(data.blog?.articles.pageInfo.hasNextPage && data.blog.articles.pageInfo.endCursor);
+      cursor = data.blog?.articles.pageInfo.endCursor ?? null;
+      try {
+        assertShopifyInventoryComplete({
+          kind: "articles",
+          loaded: articles.length,
+          hasNextPage: hasNext,
+          hardLimit
+        });
+      } catch (error) {
+        if (error instanceof IncompleteInventoryError && incompleteBehavior === "error_result") {
+          return { articles, truncated: true, warning: error.message };
+        }
+        throw error;
+      }
+    }
+    return { articles, truncated: false };
+  } catch (error) {
+    if (error instanceof IncompleteInventoryError) throw error;
+    if (error instanceof ShopifyError && (error.code === "permission" || error.code === "auth")) {
+      return {
+        articles: [],
+        warning: "Shopify blog article access unavailable for overlap checks. Grant read_content."
       };
     }
     throw error;
