@@ -222,13 +222,40 @@ export const ARTICLE_GRAPHQL_FIELDS = `
   }
 `.trim();
 
+export const IDEMPOTENCY_NAMESPACE = "legends_blog_autopilot";
+export const IDEMPOTENCY_KEY = "idempotency_key";
+
 export const ARTICLE_CREATE_MUTATION = `
   mutation CreateAutopilotArticle($article: ArticleCreateInput!) {
     articleCreate(article: $article) {
       article {
         ${ARTICLE_GRAPHQL_FIELDS}
+        metafield(namespace: "${IDEMPOTENCY_NAMESPACE}", key: "${IDEMPOTENCY_KEY}") { value }
       }
       userErrors { field message code }
+    }
+  }
+`;
+
+export const ARTICLE_UPDATE_MUTATION = `
+  mutation UpdateAutopilotArticle($id: ID!, $article: ArticleUpdateInput!) {
+    articleUpdate(id: $id, article: $article) {
+      article {
+        ${ARTICLE_GRAPHQL_FIELDS}
+        metafield(namespace: "${IDEMPOTENCY_NAMESPACE}", key: "${IDEMPOTENCY_KEY}") { value }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+export const FIND_ARTICLES_QUERY = `
+  query FindAutopilotArticles($first: Int!, $query: String!) {
+    articles(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {
+      nodes {
+        ${ARTICLE_GRAPHQL_FIELDS}
+        metafield(namespace: "${IDEMPOTENCY_NAMESPACE}", key: "${IDEMPOTENCY_KEY}") { value }
+      }
     }
   }
 `;
@@ -254,6 +281,12 @@ export function buildPublicArticleUrl(args: {
   return `${base}/blogs/${blogHandle}/${articleHandle}`;
 }
 
+export function shopifyGidNumericId(gid: string | null | undefined): string | null {
+  if (!gid) return null;
+  const match = String(gid).match(/\/(\d+)\s*$/);
+  return match?.[1] ?? null;
+}
+
 export type PublishedArticleResult = {
   id: string;
   handle: string | null;
@@ -274,10 +307,16 @@ export type ShopifyCreatedArticle = {
   isPublished?: boolean | null;
   publishedAt?: string | null;
   blog?: { id?: string | null; handle?: string | null } | null;
+  metafield?: { value?: string | null } | null;
+};
+
+export type FoundShopifyArticle = ShopifyCreatedArticle & {
+  idempotencyKey: string | null;
+  url: string | null;
 };
 
 /**
- * Map a successful articleCreate payload into the app publish result.
+ * Map a successful articleCreate/update payload into the app publish result.
  * Uses only Shopify-returned handles for public URL construction — no local fallbacks.
  */
 export function mapArticleCreateResult(args: {
@@ -286,6 +325,7 @@ export function mapArticleCreateResult(args: {
   fallbackTitle?: string | null;
   fallbackBlogId?: string | null;
   idempotencyKey?: string;
+  responseStatus?: string;
 }): PublishedArticleResult {
   const created = args.created;
   if (!created.id) throw new ShopifyError("Shopify did not create the article", "unknown", false);
@@ -307,9 +347,159 @@ export function mapArticleCreateResult(args: {
     url,
     blogId: created.blog?.id ?? args.fallbackBlogId ?? null,
     blogHandle,
-    responseStatus: "created",
-    idempotencyKey: args.idempotencyKey
+    responseStatus: args.responseStatus ?? "created",
+    idempotencyKey: args.idempotencyKey ?? created.metafield?.value ?? undefined
   };
+}
+
+function seoMetafields(article: GeneratedArticle, idempotencyKey?: string) {
+  const fields: Array<Record<string, string>> = [
+    {
+      namespace: "global",
+      key: "description_tag",
+      type: "single_line_text_field",
+      value: article.metaDescription.slice(0, 160)
+    },
+    {
+      namespace: "global",
+      key: "title_tag",
+      type: "single_line_text_field",
+      value: (article.title || "").slice(0, 70)
+    }
+  ];
+  if (idempotencyKey) {
+    fields.push({
+      namespace: IDEMPOTENCY_NAMESPACE,
+      key: IDEMPOTENCY_KEY,
+      type: "single_line_text_field",
+      value: idempotencyKey.slice(0, 255)
+    });
+  }
+  return fields;
+}
+
+function toFoundArticle(node: ShopifyCreatedArticle, storefrontUrl: string): FoundShopifyArticle {
+  const mapped = mapArticleCreateResult({ created: node, storefrontUrl, responseStatus: "found" });
+  return {
+    ...node,
+    idempotencyKey: node.metafield?.value ?? null,
+    url: mapped.url
+  };
+}
+
+/** Find an article in the selected blog by exact handle. Never auto-adopts. */
+export async function findArticleByHandle(
+  config: AppConfig,
+  blogId: string,
+  handle: string,
+  storefrontUrl: string
+): Promise<FoundShopifyArticle | null> {
+  const numericBlogId = shopifyGidNumericId(blogId);
+  const exactHandle = String(handle || "").trim();
+  if (!numericBlogId || !exactHandle) return null;
+
+  const data = await graphql<{ articles: { nodes: ShopifyCreatedArticle[] } }>(
+    config,
+    FIND_ARTICLES_QUERY,
+    { first: 10, query: `handle:${exactHandle} blog_id:${numericBlogId}` }
+  );
+
+  const match = data.articles.nodes.find(
+    node => node.handle === exactHandle && (node.blog?.id === blogId || shopifyGidNumericId(node.blog?.id) === numericBlogId)
+  );
+  return match ? toFoundArticle(match, storefrontUrl) : null;
+}
+
+/** Find an article previously created by this app using the idempotency metafield. */
+export async function findArticleByIdempotencyKey(
+  config: AppConfig,
+  blogId: string,
+  idempotencyKey: string,
+  storefrontUrl: string
+): Promise<FoundShopifyArticle | null> {
+  const numericBlogId = shopifyGidNumericId(blogId);
+  const key = String(idempotencyKey || "").trim();
+  if (!numericBlogId || !key) return null;
+
+  const data = await graphql<{ articles: { nodes: ShopifyCreatedArticle[] } }>(
+    config,
+    FIND_ARTICLES_QUERY,
+    { first: 50, query: `blog_id:${numericBlogId}` }
+  );
+
+  const match = data.articles.nodes.find(node => node.metafield?.value === key);
+  return match ? toFoundArticle(match, storefrontUrl) : null;
+}
+
+async function updateShopifyArticle(
+  config: AppConfig,
+  shopifyArticleId: string,
+  article: GeneratedArticle,
+  authorName: string,
+  settings: Settings,
+  opts?: { imageUrl?: string | null; imageAlt?: string | null; isPublished?: boolean; publishDate?: string | null; idempotencyKey?: string; responseStatus?: string }
+): Promise<PublishedArticleResult> {
+  const articleInput: Record<string, unknown> = {
+    title: article.title,
+    author: { name: authorName },
+    handle: article.handle,
+    body: article.bodyHtml,
+    summary: article.summary,
+    isPublished: opts?.isPublished ?? !settings.draftOnlyMode,
+    tags: article.tags,
+    metafields: seoMetafields(article, opts?.idempotencyKey)
+  };
+  if (opts?.publishDate) articleInput.publishDate = opts.publishDate;
+  if (opts?.imageUrl) {
+    articleInput.image = { url: opts.imageUrl, altText: opts.imageAlt || article.title };
+  }
+
+  const data = await graphql<{
+    articleUpdate: {
+      article: null | ShopifyCreatedArticle;
+      userErrors: Array<{ field?: string[]; message: string; code?: string }>;
+    };
+  }>(config, ARTICLE_UPDATE_MUTATION, { id: shopifyArticleId, article: articleInput });
+
+  if (data.articleUpdate.userErrors.length) {
+    const msg = data.articleUpdate.userErrors.map(e => {
+      const field = e.field?.length ? `${e.field.join(".")}: ` : "";
+      return `${field}${e.message}`;
+    }).join("; ");
+    const permanent = data.articleUpdate.userErrors.some(e => /taken|invalid|blank|too long|permission/i.test(e.message));
+    throw new ShopifyError(
+      `Shopify rejected article update (userErrors): ${msg}`,
+      permanent ? "validation" : "unknown",
+      !permanent
+    );
+  }
+  if (!data.articleUpdate.article?.id) {
+    throw new ShopifyError("Shopify did not update the article", "unknown", false);
+  }
+
+  return mapArticleCreateResult({
+    created: data.articleUpdate.article,
+    storefrontUrl: settings.storefrontUrl || config.STOREFRONT_URL,
+    fallbackTitle: article.title,
+    idempotencyKey: opts?.idempotencyKey,
+    responseStatus: opts?.responseStatus ?? "updated"
+  });
+}
+
+/** Pure decision helper for publish/create/recover — used by publishArticle and tests. */
+export function choosePublishStrategy(args: {
+  shopifyArticleId?: string | null;
+  recoveredByKey?: { id: string } | null;
+  byHandle?: { id: string; idempotencyKey?: string | null } | null;
+  idempotencyKey?: string | null;
+}): "update" | "recover" | "create" | "collision" {
+  if (args.shopifyArticleId) return "update";
+  if (args.recoveredByKey) return "recover";
+  if (args.byHandle) {
+    if (args.idempotencyKey && args.byHandle.idempotencyKey === args.idempotencyKey) return "recover";
+    return "collision";
+  }
+  return "create";
 }
 
 export async function publishArticle(
@@ -317,9 +507,55 @@ export async function publishArticle(
   article: GeneratedArticle,
   authorName: string,
   settings: Settings,
-  opts?: { imageUrl?: string | null; imageAlt?: string | null; isPublished?: boolean; publishDate?: string | null; idempotencyKey?: string }
+  opts?: {
+    imageUrl?: string | null;
+    imageAlt?: string | null;
+    isPublished?: boolean;
+    publishDate?: string | null;
+    idempotencyKey?: string;
+    shopifyArticleId?: string | null;
+  }
 ): Promise<PublishedArticleResult> {
   const blog = await resolveBlog(config, settings);
+  const storefrontUrl = settings.storefrontUrl || config.STOREFRONT_URL;
+  const key = opts?.idempotencyKey;
+
+  // Linked articles always update — never create a duplicate.
+  if (opts?.shopifyArticleId) {
+    return updateShopifyArticle(config, opts.shopifyArticleId, article, authorName, settings, {
+      ...opts,
+      responseStatus: "updated"
+    });
+  }
+
+  // Before create: recover via idempotency marker / matching handle marker.
+  const recoveredByKey = key
+    ? await findArticleByIdempotencyKey(config, blog.id, key, storefrontUrl)
+    : null;
+  const byHandle = await findArticleByHandle(config, blog.id, article.handle, storefrontUrl);
+  const strategy = choosePublishStrategy({
+    shopifyArticleId: null,
+    recoveredByKey,
+    byHandle,
+    idempotencyKey: key
+  });
+
+  if (strategy === "recover") {
+    const targetId = recoveredByKey?.id || byHandle!.id;
+    return updateShopifyArticle(config, targetId, article, authorName, settings, {
+      ...opts,
+      responseStatus: "recovered"
+    });
+  }
+
+  if (strategy === "collision" && byHandle) {
+    throw new ShopifyError(
+      `An article with handle "${article.handle}" already exists in Shopify (${byHandle.id}). Use “Link existing Shopify article” to adopt it intentionally — Autopilot will not overwrite it automatically.`,
+      "validation",
+      false
+    );
+  }
+
   const articleInput: Record<string, unknown> = {
     blogId: blog.id,
     title: article.title,
@@ -329,20 +565,7 @@ export async function publishArticle(
     summary: article.summary,
     isPublished: opts?.isPublished ?? !settings.draftOnlyMode,
     tags: article.tags,
-    metafields: [
-      {
-        namespace: "global",
-        key: "description_tag",
-        type: "single_line_text_field",
-        value: article.metaDescription.slice(0, 160)
-      },
-      {
-        namespace: "global",
-        key: "title_tag",
-        type: "single_line_text_field",
-        value: (article.title || "").slice(0, 70)
-      }
-    ]
+    metafields: seoMetafields(article, key)
   };
 
   if (opts?.publishDate) articleInput.publishDate = opts.publishDate;
@@ -353,36 +576,75 @@ export async function publishArticle(
     };
   }
 
-  const data = await graphql<{
-    articleCreate: {
-      article: null | ShopifyCreatedArticle;
-      userErrors: Array<{ field?: string[]; message: string; code?: string }>;
-    };
-  }>(config, ARTICLE_CREATE_MUTATION, { article: articleInput });
+  try {
+    const data = await graphql<{
+      articleCreate: {
+        article: null | ShopifyCreatedArticle;
+        userErrors: Array<{ field?: string[]; message: string; code?: string }>;
+      };
+    }>(config, ARTICLE_CREATE_MUTATION, { article: articleInput });
 
-  if (data.articleCreate.userErrors.length) {
-    const msg = data.articleCreate.userErrors.map(e => {
-      const field = e.field?.length ? `${e.field.join(".")}: ` : "";
-      return `${field}${e.message}`;
-    }).join("; ");
-    const permanent = data.articleCreate.userErrors.some(e => /taken|invalid|blank|too long|permission/i.test(e.message));
-    throw new ShopifyError(
-      `Shopify rejected article (userErrors): ${msg}`,
-      permanent ? "validation" : "unknown",
-      !permanent
-    );
-  }
-  if (!data.articleCreate.article?.id) {
-    throw new ShopifyError("Shopify did not create the article", "unknown", false);
-  }
+    if (data.articleCreate.userErrors.length) {
+      const msg = data.articleCreate.userErrors.map(e => {
+        const field = e.field?.length ? `${e.field.join(".")}: ` : "";
+        return `${field}${e.message}`;
+      }).join("; ");
+      const handleTaken = data.articleCreate.userErrors.some(e => /taken|already been taken|handle/i.test(e.message));
+      if (handleTaken && key) {
+        const recovered = await recoverAfterCreateFailure(config, blog.id, article.handle, key, storefrontUrl);
+        if (recovered) {
+          return updateShopifyArticle(config, recovered.id, article, authorName, settings, {
+            ...opts,
+            responseStatus: "recovered"
+          });
+        }
+      }
+      const permanent = data.articleCreate.userErrors.some(e => /taken|invalid|blank|too long|permission/i.test(e.message));
+      throw new ShopifyError(
+        `Shopify rejected article (userErrors): ${msg}`,
+        permanent ? "validation" : "unknown",
+        !permanent
+      );
+    }
+    if (!data.articleCreate.article?.id) {
+      throw new ShopifyError("Shopify did not create the article", "unknown", false);
+    }
 
-  return mapArticleCreateResult({
-    created: data.articleCreate.article,
-    storefrontUrl: settings.storefrontUrl || config.STOREFRONT_URL,
-    fallbackTitle: article.title,
-    fallbackBlogId: blog.id,
-    idempotencyKey: opts?.idempotencyKey
-  });
+    return mapArticleCreateResult({
+      created: data.articleCreate.article,
+      storefrontUrl,
+      fallbackTitle: article.title,
+      fallbackBlogId: blog.id,
+      idempotencyKey: key,
+      responseStatus: "created"
+    });
+  } catch (error) {
+    // Ambiguous network/server failure after a possible successful create: recover via marker.
+    if (key && error instanceof ShopifyError && (error.retryable || error.code === "network" || error.code === "server")) {
+      const recovered = await recoverAfterCreateFailure(config, blog.id, article.handle, key, storefrontUrl);
+      if (recovered) {
+        return updateShopifyArticle(config, recovered.id, article, authorName, settings, {
+          ...opts,
+          responseStatus: "recovered"
+        });
+      }
+    }
+    throw error;
+  }
+}
+
+async function recoverAfterCreateFailure(
+  config: AppConfig,
+  blogId: string,
+  handle: string,
+  idempotencyKey: string,
+  storefrontUrl: string
+): Promise<FoundShopifyArticle | null> {
+  const byKey = await findArticleByIdempotencyKey(config, blogId, idempotencyKey, storefrontUrl);
+  if (byKey) return byKey;
+  const byHandle = await findArticleByHandle(config, blogId, handle, storefrontUrl);
+  if (byHandle && byHandle.idempotencyKey === idempotencyKey) return byHandle;
+  return null;
 }
 
 export async function verifyShopify(config: AppConfig, settings?: Settings) {

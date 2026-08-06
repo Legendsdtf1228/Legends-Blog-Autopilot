@@ -701,6 +701,78 @@ export async function cancelScheduledArticle(db: Db, id: number): Promise<Articl
   }
 }
 
+/** Cancel pending/failed/running publish jobs after a merchant links an existing Shopify article. */
+export async function cancelPendingJobsForArticle(db: Db, articleId: number, reason: string): Promise<number> {
+  const { rowCount } = await db.query(
+    `UPDATE publish_jobs
+     SET status='cancelled', error=$2, updated_at=now(), completed_at=now()
+     WHERE article_id=$1 AND status IN ('pending','failed','running')`,
+    [articleId, reason.slice(0, 4000)]
+  );
+  return rowCount ?? 0;
+}
+
+/** Persist a merchant-confirmed link to an existing Shopify article. */
+export async function linkArticleToShopify(
+  db: Db,
+  articleId: number,
+  link: {
+    shopifyArticleId: string;
+    shopifyBlogId: string | null;
+    shopifyHandle: string | null;
+    shopifyUrl: string | null;
+    isPublished: boolean;
+    publishedAt?: string | null;
+    responseStatus?: string;
+  }
+): Promise<ArticleRecord | null> {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const status = link.isPublished ? "published" : "draft";
+    const { rows } = await client.query(
+      `UPDATE articles SET
+        status=$2,
+        shopify_article_id=$3,
+        shopify_blog_id=$4,
+        shopify_handle=$5,
+        shopify_url=$6,
+        shopify_response_status=$7,
+        published_at=CASE WHEN $8::boolean THEN COALESCE(published_at, COALESCE($9::timestamptz, now())) ELSE published_at END,
+        last_error=NULL,
+        updated_at=now()
+       WHERE id=$1
+       RETURNING *`,
+      [
+        articleId,
+        status,
+        link.shopifyArticleId,
+        link.shopifyBlogId,
+        link.shopifyHandle,
+        link.shopifyUrl,
+        link.responseStatus ?? "linked",
+        link.isPublished,
+        link.publishedAt ?? null
+      ]
+    );
+    await client.query(
+      `UPDATE publish_jobs
+       SET status='cancelled', error=$2, updated_at=now(), completed_at=now(),
+           shopify_article_id=COALESCE(shopify_article_id, $3),
+           shopify_url=COALESCE(shopify_url, $4)
+       WHERE article_id=$1 AND status IN ('pending','failed','running')`,
+      [articleId, "Cancelled after linking existing Shopify article", link.shopifyArticleId, link.shopifyUrl]
+    );
+    await client.query("COMMIT");
+    return rows[0] ? mapArticle(rows[0] as Record<string, unknown>) : null;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function scheduleArticleJob(db: Db, articleId: number, scheduledFor: Date, idempotencyKey: string): Promise<number> {
   const client = await db.connect();
   try {

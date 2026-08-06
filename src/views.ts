@@ -271,13 +271,16 @@ export function articleEditorPage(args: {
         <button form="publish-now" class="primary" type="submit">Publish immediately</button>
         <button form="schedule" type="submit">Schedule publication</button>
         <button form="cancel-schedule" type="submit">Cancel schedule</button>
+        ${a.shopifyArticleId
+          ? `<p class="muted">Linked to Shopify <code>${esc(a.shopifyArticleId)}</code>. Future publishes use articleUpdate.</p>`
+          : `<a class="button" href="/articles/${a.id}/link-shopify">Link existing Shopify article</a>`}
         <button form="duplicate" type="submit">Duplicate</button>
         <button form="archive" type="submit">Archive</button>
         <button form="retry" type="submit">Retry failed</button>
         <a class="button" href="/articles/${a.id}/preview" target="_blank">Preview</a>
         ${a.shopifyUrl ? `<a class="button" href="${esc(a.shopifyUrl)}" target="_blank" rel="noreferrer">Shopify URL</a>` : ""}
       </div>
-      <p class="muted">Partial regeneration preserves merchant-edited fields. Full regeneration asks for confirmation.</p>
+      <p class="muted">Partial regeneration preserves merchant-edited fields. Full regeneration asks for confirmation. Linking never happens automatically from handle alone.</p>
       ` : `
       <div class="stack">
         <p class="muted">Save a draft first, or use AI generate on the New Article page.</p>
@@ -424,6 +427,55 @@ export function settingsPage(args: {
       <div class="actions"><button class="primary" type="submit">Save settings</button></div>
     </section>
   </form>`;
+}
+
+export function linkShopifyPage(args: {
+  article: ArticleRecord;
+  settings: Settings;
+  csrf: string;
+  candidate?: {
+    id: string;
+    title: string | null;
+    handle: string | null;
+    isPublished: boolean | null;
+    url: string | null;
+    blogHandle: string | null;
+  } | null;
+  error?: string;
+}) {
+  const a = args.article;
+  const c = args.candidate;
+  return `
+  <section class="card">
+    <h2>Link existing Shopify article</h2>
+    <p class="muted">Recover when Shopify already created the article but this app did not save the Shopify ID. Lookup uses the selected blog and the exact local handle <strong>${esc(a.handle)}</strong>. Nothing is adopted without your confirmation.</p>
+    ${args.error ? `<div class="notice error">${esc(args.error)}</div>` : ""}
+    ${!c ? `
+      <form method="post" action="/articles/${a.id}/link-shopify/search" class="actions">
+        <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+        <button class="primary" type="submit">Search Shopify for this handle</button>
+        <a class="button" href="/articles/${a.id}">Cancel</a>
+      </form>
+    ` : `
+      <div class="notice">Confirm this is the Shopify article to link. Autopilot will not overwrite or adopt it until you confirm.</div>
+      <dl class="list" style="list-style:none;padding:0">
+        <li><strong>Title:</strong> ${esc(c.title || "—")}</li>
+        <li><strong>Handle:</strong> ${esc(c.handle || "—")}</li>
+        <li><strong>Publication status:</strong> ${c.isPublished ? "Published" : "Draft / unpublished"}</li>
+        <li><strong>Shopify ID:</strong> <code>${esc(c.id)}</code></li>
+        <li><strong>URL:</strong> ${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noreferrer">${esc(c.url)}</a>` : "— (URL unavailable; ID will still be saved)"}</li>
+        <li><strong>Blog handle:</strong> ${esc(c.blogHandle || "—")}</li>
+      </dl>
+      <form method="post" action="/articles/${a.id}/link-shopify/confirm" class="actions" onsubmit="return confirm('Link this Shopify article to the local draft? Pending publish jobs will be cancelled.')">
+        <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+        <input type="hidden" name="shopifyArticleId" value="${esc(c.id)}">
+        <input type="hidden" name="confirm" value="1">
+        <button class="primary" type="submit">Confirm link</button>
+        <a class="button" href="/articles/${a.id}/link-shopify">Search again</a>
+        <a class="button" href="/articles/${a.id}">Cancel</a>
+      </form>
+    `}
+  </section>`;
 }
 
 export function diagnosticsPage(args: {
