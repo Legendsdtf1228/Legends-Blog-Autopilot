@@ -261,11 +261,56 @@ export type PublishedArticleResult = {
   isPublished: boolean | null;
   publishedAt: string | null;
   url: string | null;
-  blogId: string;
+  blogId: string | null;
   blogHandle: string | null;
   responseStatus: string;
   idempotencyKey?: string;
 };
+
+export type ShopifyCreatedArticle = {
+  id: string;
+  handle?: string | null;
+  title?: string | null;
+  isPublished?: boolean | null;
+  publishedAt?: string | null;
+  blog?: { id?: string | null; handle?: string | null } | null;
+};
+
+/**
+ * Map a successful articleCreate payload into the app publish result.
+ * Uses only Shopify-returned handles for public URL construction — no local fallbacks.
+ */
+export function mapArticleCreateResult(args: {
+  created: ShopifyCreatedArticle;
+  storefrontUrl: string;
+  fallbackTitle?: string | null;
+  fallbackBlogId?: string | null;
+  idempotencyKey?: string;
+}): PublishedArticleResult {
+  const created = args.created;
+  if (!created.id) throw new ShopifyError("Shopify did not create the article", "unknown", false);
+
+  const blogHandle = created.blog?.handle ?? null;
+  const articleHandle = created.handle ?? null;
+  const url = buildPublicArticleUrl({
+    storefrontUrl: args.storefrontUrl,
+    blogHandle,
+    articleHandle
+  });
+
+  return {
+    id: created.id,
+    handle: articleHandle,
+    title: created.title ?? args.fallbackTitle ?? null,
+    isPublished: created.isPublished ?? null,
+    publishedAt: created.publishedAt ?? null,
+    url,
+    blogId: created.blog?.id ?? args.fallbackBlogId ?? null,
+    blogHandle,
+    responseStatus: "created",
+    idempotencyKey: args.idempotencyKey
+  };
+}
 
 export async function publishArticle(
   config: AppConfig,
@@ -310,14 +355,7 @@ export async function publishArticle(
 
   const data = await graphql<{
     articleCreate: {
-      article: null | {
-        id: string;
-        handle?: string | null;
-        title?: string | null;
-        isPublished?: boolean | null;
-        publishedAt?: string | null;
-        blog?: { id?: string | null; handle?: string | null } | null;
-      };
+      article: null | ShopifyCreatedArticle;
       userErrors: Array<{ field?: string[]; message: string; code?: string }>;
     };
   }>(config, ARTICLE_CREATE_MUTATION, { article: articleInput });
@@ -338,28 +376,13 @@ export async function publishArticle(
     throw new ShopifyError("Shopify did not create the article", "unknown", false);
   }
 
-  const created = data.articleCreate.article;
-  const blogHandle = created.blog?.handle || blog.handle || settings.shopifyBlogHandle || null;
-  const articleHandle = created.handle || article.handle || null;
-  const storefrontUrl = settings.storefrontUrl || config.STOREFRONT_URL;
-  const url = buildPublicArticleUrl({
-    storefrontUrl,
-    blogHandle,
-    articleHandle
-  });
-
-  return {
-    id: created.id,
-    handle: articleHandle,
-    title: created.title ?? article.title,
-    isPublished: created.isPublished ?? null,
-    publishedAt: created.publishedAt ?? null,
-    url,
-    blogId: created.blog?.id || blog.id,
-    blogHandle,
-    responseStatus: "created",
+  return mapArticleCreateResult({
+    created: data.articleCreate.article,
+    storefrontUrl: settings.storefrontUrl || config.STOREFRONT_URL,
+    fallbackTitle: article.title,
+    fallbackBlogId: blog.id,
     idempotencyKey: opts?.idempotencyKey
-  };
+  });
 }
 
 export async function verifyShopify(config: AppConfig, settings?: Settings) {

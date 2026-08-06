@@ -6,8 +6,11 @@ import { defaultSettings } from "../src/defaults.js";
 import {
   ARTICLE_CREATE_MUTATION,
   buildPublicArticleUrl,
+  mapArticleCreateResult,
   normalizeStorefrontUrl
 } from "../src/shopify.js";
+import { createDb, migrate, createArticle, getArticle, finishJob, insertManualJob } from "../src/db.js";
+import type { GeneratedArticle } from "../src/types.js";
 
 /**
  * Controlled publishing test with a mocked Admin GraphQL transport.
@@ -91,4 +94,83 @@ test("config types still compile for controlled publish signature", () => {
     }),
     "https://legendsdtf.com/blogs/news/x"
   );
+});
+
+test("publishArticle response mapping leaves URL null when Shopify omits handles", { skip: !process.env.DATABASE_URL }, async () => {
+  const settings: Settings = {
+    ...defaultSettings,
+    storefrontUrl: "https://legendsdtf.com/",
+    shopifyBlogHandle: "news",
+    draftOnlyMode: true,
+    enabled: false
+  };
+
+  // Local article has handles — mapping must NOT fall back to them.
+  const localArticle: GeneratedArticle = {
+    title: "Heat press tips for DTF transfers",
+    handle: "heat-press-tips-for-dtf-transfers",
+    summary: "A practical guide long enough for testing null Shopify handle response mapping.",
+    metaDescription: "Practical heat press tips for DTF transfers from Legends DTF Prints in Warner Robins.",
+    bodyHtml: `<h2>Guide</h2><p>${"word ".repeat(200)}</p>`,
+    tags: ["DTF", "Heat press"],
+    primaryKeyword: "heat press",
+    topicFingerprint: `null-handles-${Date.now()}`,
+    rationale: "Regression for Shopify-omitted handles."
+  };
+
+  const created = {
+    id: "gid://shopify/Article/123",
+    handle: null,
+    blog: { id: "gid://shopify/Blog/1", handle: null }
+  };
+
+  const published = mapArticleCreateResult({
+    created,
+    storefrontUrl: settings.storefrontUrl,
+    fallbackTitle: localArticle.title,
+    fallbackBlogId: "gid://shopify/Blog/local-fallback",
+    idempotencyKey: "test:null-handles"
+  });
+
+  assert.equal(published.id, "gid://shopify/Article/123");
+  assert.equal(published.handle, null);
+  assert.equal(published.blogHandle, null);
+  assert.equal(published.url, null);
+  assert.equal(published.responseStatus, "created");
+
+  const db = createDb(process.env.DATABASE_URL!);
+  await migrate(db);
+  const record = await createArticle(db, {
+    title: localArticle.title,
+    handle: localArticle.handle,
+    excerpt: localArticle.summary,
+    metaTitle: localArticle.title,
+    metaDescription: localArticle.metaDescription,
+    bodyHtml: localArticle.bodyHtml,
+    tags: localArticle.tags,
+    author: settings.authorName,
+    primaryKeyword: localArticle.primaryKeyword,
+    secondaryKeywords: [],
+    topicFingerprint: localArticle.topicFingerprint,
+    rationale: localArticle.rationale,
+    featuredImageUrl: null,
+    featuredImageAlt: null
+  }, { status: "publishing", source: "test" });
+
+  const jobId = await insertManualJob(db, record.id);
+  await finishJob(db, jobId, localArticle, published.id, published.url, {
+    articleId: record.id,
+    blogId: published.blogId ?? undefined,
+    handle: published.handle,
+    responseStatus: published.responseStatus
+  });
+
+  const saved = await getArticle(db, record.id);
+  assert.ok(saved);
+  assert.equal(saved!.status, "published");
+  assert.equal(saved!.shopifyArticleId, "gid://shopify/Article/123");
+  assert.equal(saved!.shopifyUrl, null);
+  assert.equal(settings.enabled, false);
+  assert.equal(settings.draftOnlyMode, true);
+  await db.end();
 });

@@ -171,7 +171,7 @@ export class AutopilotWorker {
 
       await finishJob(this.db, job.id, article, published.id, published.url, {
         articleId: articleId ?? undefined,
-        blogId: published.blogId,
+        blogId: published.blogId ?? undefined,
         handle: published.handle,
         responseStatus: published.responseStatus
       });
