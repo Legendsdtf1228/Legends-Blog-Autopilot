@@ -364,8 +364,8 @@ export async function finishJob(
   id: number,
   article: GeneratedArticle,
   shopifyId: string,
-  url: string,
-  extras?: { blogId?: string; responseStatus?: string; articleId?: number; handle?: string }
+  url: string | null,
+  extras?: { blogId?: string; responseStatus?: string; articleId?: number; handle?: string | null }
 ): Promise<void> {
   const client = await db.connect();
   try {
