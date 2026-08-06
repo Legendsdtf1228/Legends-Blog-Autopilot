@@ -85,7 +85,8 @@ async function graphqlOnce<T>(config: AppConfig, query: string, variables: Recor
   if (json.errors?.length) {
     const msg = json.errors.map(e => e.message).join("; ");
     const code = json.errors.some(e => /access|permission|scope/i.test(e.message)) ? "permission" : "unknown";
-    throw new ShopifyError(`Shopify GraphQL: ${msg}`, code, false, response.status);
+    // Top-level GraphQL errors are distinct from mutation userErrors.
+    throw new ShopifyError(`Shopify GraphQL error: ${msg}`, code, false, response.status);
   }
   if (!json.data) throw new ShopifyError("Shopify returned no data", "unknown", false, response.status);
   return { data: json.data, status: response.status };
@@ -208,13 +209,71 @@ export async function searchProducts(config: AppConfig, query: string, storefron
     }));
 }
 
+/** Fields supported on Admin GraphQL Article (public store URL is built in app code). */
+export const ARTICLE_GRAPHQL_FIELDS = `
+  id
+  handle
+  title
+  isPublished
+  publishedAt
+  blog {
+    id
+    handle
+  }
+`.trim();
+
+export const ARTICLE_CREATE_MUTATION = `
+  mutation CreateAutopilotArticle($article: ArticleCreateInput!) {
+    articleCreate(article: $article) {
+      article {
+        ${ARTICLE_GRAPHQL_FIELDS}
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+export function normalizeStorefrontUrl(storefrontUrl: string): string {
+  return String(storefrontUrl || "").trim().replace(/\/+$/, "");
+}
+
+/**
+ * Build the customer-facing article URL from storefront + blog/article handles.
+ * Returns null when handles are missing — publication can still succeed with Shopify ID only.
+ * Never uses the permanent .myshopify.com admin domain as the public URL.
+ */
+export function buildPublicArticleUrl(args: {
+  storefrontUrl: string;
+  blogHandle?: string | null;
+  articleHandle?: string | null;
+}): string | null {
+  const base = normalizeStorefrontUrl(args.storefrontUrl);
+  const blogHandle = String(args.blogHandle || "").trim().replace(/^\/+|\/+$/g, "");
+  const articleHandle = String(args.articleHandle || "").trim().replace(/^\/+|\/+$/g, "");
+  if (!base || !blogHandle || !articleHandle) return null;
+  return `${base}/blogs/${blogHandle}/${articleHandle}`;
+}
+
+export type PublishedArticleResult = {
+  id: string;
+  handle: string | null;
+  title: string | null;
+  isPublished: boolean | null;
+  publishedAt: string | null;
+  url: string | null;
+  blogId: string;
+  blogHandle: string | null;
+  responseStatus: string;
+  idempotencyKey?: string;
+};
+
 export async function publishArticle(
   config: AppConfig,
   article: GeneratedArticle,
   authorName: string,
   settings: Settings,
   opts?: { imageUrl?: string | null; imageAlt?: string | null; isPublished?: boolean; publishDate?: string | null; idempotencyKey?: string }
-) {
+): Promise<PublishedArticleResult> {
   const blog = await resolveBlog(config, settings);
   const articleInput: Record<string, unknown> = {
     blogId: blog.id,
@@ -251,33 +310,53 @@ export async function publishArticle(
 
   const data = await graphql<{
     articleCreate: {
-      article: null | { id: string; handle: string; onlineStoreUrl?: string | null };
+      article: null | {
+        id: string;
+        handle?: string | null;
+        title?: string | null;
+        isPublished?: boolean | null;
+        publishedAt?: string | null;
+        blog?: { id?: string | null; handle?: string | null } | null;
+      };
       userErrors: Array<{ field?: string[]; message: string; code?: string }>;
     };
-  }>(config, `
-    mutation CreateAutopilotArticle($article: ArticleCreateInput!) {
-      articleCreate(article: $article) {
-        article { id handle onlineStoreUrl }
-        userErrors { field message code }
-      }
-    }
-  `, { article: articleInput });
+  }>(config, ARTICLE_CREATE_MUTATION, { article: articleInput });
 
   if (data.articleCreate.userErrors.length) {
-    const msg = data.articleCreate.userErrors.map(e => e.message).join("; ");
+    const msg = data.articleCreate.userErrors.map(e => {
+      const field = e.field?.length ? `${e.field.join(".")}: ` : "";
+      return `${field}${e.message}`;
+    }).join("; ");
     const permanent = data.articleCreate.userErrors.some(e => /taken|invalid|blank|too long|permission/i.test(e.message));
-    throw new ShopifyError(`Shopify rejected article: ${msg}`, permanent ? "validation" : "unknown", !permanent);
+    throw new ShopifyError(
+      `Shopify rejected article (userErrors): ${msg}`,
+      permanent ? "validation" : "unknown",
+      !permanent
+    );
   }
-  if (!data.articleCreate.article) throw new ShopifyError("Shopify did not create the article", "unknown", false);
+  if (!data.articleCreate.article?.id) {
+    throw new ShopifyError("Shopify did not create the article", "unknown", false);
+  }
 
   const created = data.articleCreate.article;
-  const handle = settings.shopifyBlogHandle || blog.handle || "news";
+  const blogHandle = created.blog?.handle || blog.handle || settings.shopifyBlogHandle || null;
+  const articleHandle = created.handle || article.handle || null;
+  const storefrontUrl = settings.storefrontUrl || config.STOREFRONT_URL;
+  const url = buildPublicArticleUrl({
+    storefrontUrl,
+    blogHandle,
+    articleHandle
+  });
+
   return {
     id: created.id,
-    handle: created.handle,
-    url: created.onlineStoreUrl ?? `${(settings.storefrontUrl || config.STOREFRONT_URL).replace(/\/$/, "")}/blogs/${handle}/${created.handle}`,
-    blogId: blog.id,
-    blogHandle: blog.handle,
+    handle: articleHandle,
+    title: created.title ?? article.title,
+    isPublished: created.isPublished ?? null,
+    publishedAt: created.publishedAt ?? null,
+    url,
+    blogId: created.blog?.id || blog.id,
+    blogHandle,
     responseStatus: "created",
     idempotencyKey: opts?.idempotencyKey
   };
