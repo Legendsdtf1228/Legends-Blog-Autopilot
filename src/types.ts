@@ -23,6 +23,32 @@ export type ArticleLength = "short" | "medium" | "long" | "custom";
 
 export type SeoBehavior = "auto" | "manual";
 
+export interface ResearchConfig {
+  enabled: boolean;
+  region: string;
+  freshnessMaxDays: number;
+  overlapRejectThreshold: number;
+  requireInterviewForFirstPerson: boolean;
+  weights: {
+    demandScore: number;
+    growthScore: number;
+    businessRelevance: number;
+    conversionIntent: number;
+    rankingOpportunity: number;
+    localRelevance: number;
+    freshnessScore: number;
+    contentGapScore: number;
+  };
+  pillarBalance: {
+    dtf_education: number;
+    apparel_garment: number;
+    design_color_branding: number;
+    apparel_business: number;
+    honest_entrepreneurship: number;
+    legends_story: number;
+  };
+}
+
 export interface Settings {
   enabled: boolean;
   cadence: Cadence;
@@ -49,6 +75,7 @@ export interface Settings {
   enableAiImages: boolean;
   primaryKeywordDefault: string;
   secondaryKeywordsDefault: string[];
+  research: ResearchConfig;
 }
 
 export interface ProductLink {

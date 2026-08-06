@@ -1,4 +1,4 @@
-import type { Settings } from "./types.js";
+import type { ResearchConfig, Settings } from "./types.js";
 
 export const CONTENT_LIMITS = {
   title: { min: 10, max: 120 },
@@ -41,16 +41,12 @@ export const defaultSettings: Settings = {
     "Customers should use the current website product pages for live prices, sizes, options, and availability."
   ],
   contentPillars: [
-    "DTF printing education",
-    "gang sheet planning and artwork preparation",
-    "heat press instructions and transfer care",
-    "DTF versus vinyl, sublimation, or screen printing",
-    "embroidery and branded apparel",
-    "school, team, and spirit wear",
-    "small-business branding and merchandise",
-    "seasonal ordering guidance",
-    "Warner Robins and Middle Georgia custom apparel",
-    "product and service spotlights"
+    "DTF Education",
+    "Apparel and Garment Knowledge",
+    "Design, Color, and Branding",
+    "Apparel-Business Education",
+    "Honest Entrepreneurship",
+    "Legends DTF Story and Behind the Scenes"
   ],
   shopifyBlogId: null,
   shopifyBlogHandle: "news",
@@ -66,8 +62,47 @@ export const defaultSettings: Settings = {
   retryLimit: 4,
   enableAiImages: false,
   primaryKeywordDefault: "DTF transfers",
-  secondaryKeywordsDefault: ["gang sheets", "custom apparel", "Warner Robins"]
+  secondaryKeywordsDefault: ["gang sheets", "custom apparel", "Warner Robins"],
+  research: {
+    enabled: true,
+    region: "United States / Georgia / Warner Robins",
+    freshnessMaxDays: 45,
+    overlapRejectThreshold: 0.72,
+    requireInterviewForFirstPerson: true,
+    weights: {
+      demandScore: 0.15,
+      growthScore: 0.15,
+      businessRelevance: 0.2,
+      conversionIntent: 0.15,
+      rankingOpportunity: 0.1,
+      localRelevance: 0.1,
+      freshnessScore: 0.05,
+      contentGapScore: 0.1
+    },
+    pillarBalance: {
+      dtf_education: 0.25,
+      apparel_garment: 0.2,
+      design_color_branding: 0.15,
+      apparel_business: 0.15,
+      honest_entrepreneurship: 0.15,
+      legends_story: 0.1
+    }
+  }
 };
+
+export function mergeResearchConfig(raw: Partial<ResearchConfig> | null | undefined): ResearchConfig {
+  const base = defaultSettings.research;
+  return {
+    ...base,
+    ...(raw ?? {}),
+    enabled: Boolean(raw?.enabled ?? base.enabled),
+    weights: { ...base.weights, ...(raw?.weights ?? {}) },
+    pillarBalance: { ...base.pillarBalance, ...(raw?.pillarBalance ?? {}) },
+    requireInterviewForFirstPerson: raw?.requireInterviewForFirstPerson ?? base.requireInterviewForFirstPerson,
+    freshnessMaxDays: Number(raw?.freshnessMaxDays ?? base.freshnessMaxDays),
+    overlapRejectThreshold: Number(raw?.overlapRejectThreshold ?? base.overlapRejectThreshold)
+  };
+}
 
 export function mergeSettings(raw: Partial<Settings> | null | undefined): Settings {
   const base = { ...defaultSettings, ...(raw ?? {}) };
@@ -82,6 +117,7 @@ export function mergeSettings(raw: Partial<Settings> | null | undefined): Settin
     draftOnlyMode: raw?.draftOnlyMode ?? true,
     retryLimit: Number(raw?.retryLimit ?? defaultSettings.retryLimit),
     shopifyBlogId: raw?.shopifyBlogId ?? null,
-    openaiModel: raw?.openaiModel ?? null
+    openaiModel: raw?.openaiModel ?? null,
+    research: mergeResearchConfig(raw?.research)
   };
 }
