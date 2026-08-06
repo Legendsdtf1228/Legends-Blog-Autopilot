@@ -10,7 +10,6 @@ import {
   normalizeStorefrontUrl
 } from "../src/shopify.js";
 import { createDb, migrate, createArticle, getArticle, finishJob, insertManualJob } from "../src/db.js";
-import type { GeneratedArticle } from "../src/types.js";
 
 /**
  * Controlled publishing test with a mocked Admin GraphQL transport.
