@@ -162,11 +162,13 @@ export class AutopilotWorker {
         }
       }
 
+      const existingForPublish = articleId ? await getArticle(this.db, articleId) : null;
       const published = await publishArticle(this.config, article, settings.authorName, settings, {
-        imageUrl: articleId ? (await getArticle(this.db, articleId))?.featuredImageUrl : null,
-        imageAlt: articleId ? (await getArticle(this.db, articleId))?.featuredImageAlt : null,
+        imageUrl: existingForPublish?.featuredImageUrl ?? null,
+        imageAlt: existingForPublish?.featuredImageAlt ?? null,
         isPublished: true,
-        idempotencyKey: `job:${job.id}`
+        idempotencyKey: existingForPublish?.idempotencyKey || `job:${job.id}`,
+        shopifyArticleId: existingForPublish?.shopifyArticleId
       });
 
       await finishJob(this.db, job.id, article, published.id, published.url, {

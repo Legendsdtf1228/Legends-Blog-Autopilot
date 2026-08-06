@@ -15,6 +15,7 @@ import {
   getOverviewStats,
   getSettings,
   insertManualJob,
+  linkArticleToShopify,
   listArticles,
   listAudit,
   listJobs,
@@ -26,7 +27,16 @@ import {
   updateArticle
 } from "./db.js";
 import { AutopilotWorker } from "./scheduler.js";
-import { getProductLinks, listBlogs, publishArticle, searchProducts, verifyShopify, safeShopifyErrorMessage } from "./shopify.js";
+import {
+  findArticleByHandle,
+  getProductLinks,
+  listBlogs,
+  publishArticle,
+  resolveBlog,
+  searchProducts,
+  verifyShopify,
+  safeShopifyErrorMessage
+} from "./shopify.js";
 import { diagnoseOpenAI, generateArticle } from "./writer.js";
 import { fromGenerated, normalizeArticle, toGenerated, validateArticle } from "./content.js";
 import { mergeSettings } from "./defaults.js";
@@ -47,6 +57,7 @@ import {
   articlesListPage,
   diagnosticsPage,
   layout,
+  linkShopifyPage,
   loginPage,
   newArticlePage,
   overviewPage,
@@ -594,40 +605,177 @@ app.post("/articles/:id/publish", async (req: AuthedRequest, res) => {
   const settings = await getSettings(db);
   const article = await getArticle(db, id);
   if (!article) return res.status(404).send("Not found");
-  if (article.shopifyArticleId) {
-    return res.redirect(`/articles/${id}?notice=${encodeURIComponent("Already published.")}`);
-  }
 
   const validated = validateArticle(article, { settings, requireReady: true });
   if (!validated.ok) {
     return res.redirect(`/articles/${id}?error=${encodeURIComponent(validated.errors.map(e => e.message).join("; "))}`);
   }
 
+  const idempotencyKey = article.idempotencyKey || `publish:${id}`;
   try {
-    await updateArticle(db, id, { status: "publishing", idempotencyKey: `publish:${id}` });
+    await updateArticle(db, id, { status: "publishing", idempotencyKey });
     const published = await publishArticle(config, toGenerated(validated.content!), article.author || settings.authorName, settings, {
       imageUrl: article.featuredImageUrl,
       imageAlt: article.featuredImageAlt,
       isPublished: true,
-      idempotencyKey: `publish:${id}`
+      idempotencyKey,
+      shopifyArticleId: article.shopifyArticleId
     });
     await updateArticle(db, id, {
-      status: "published",
+      status: published.isPublished === false ? "draft" : "published",
       shopifyArticleId: published.id,
       shopifyUrl: published.url,
       shopifyHandle: published.handle,
       shopifyBlogId: published.blogId,
       shopifyResponseStatus: published.responseStatus,
-      publishedAt: new Date(),
-      lastError: null
+      publishedAt: published.isPublished === false ? article.publishedAt : new Date(),
+      lastError: null,
+      idempotencyKey
     });
-    await recordAudit(db, { actor: actor(req), action: "article_published_manual", articleId: id, detail: { url: published.url } });
-    res.redirect(`/articles/${id}?notice=${encodeURIComponent("Published to Shopify.")}`);
+    await recordAudit(db, {
+      actor: actor(req),
+      action: article.shopifyArticleId ? "article_updated_shopify" : "article_published_manual",
+      articleId: id,
+      detail: { url: published.url, responseStatus: published.responseStatus, shopifyId: published.id }
+    });
+    const notice = published.responseStatus === "recovered"
+      ? "Recovered existing Shopify article and linked it (no duplicate create)."
+      : published.responseStatus === "updated"
+        ? "Updated existing Shopify article."
+        : "Published to Shopify.";
+    res.redirect(`/articles/${id}?notice=${encodeURIComponent(notice)}`);
   } catch (error) {
     const message = safeShopifyErrorMessage(error);
-    await updateArticle(db, id, { status: "failed", lastError: message });
+    await updateArticle(db, id, { status: "failed", lastError: message, idempotencyKey });
     await recordAudit(db, { actor: actor(req), action: "article_publish_failed", articleId: id, detail: { error: message } });
     res.redirect(`/articles/${id}?error=${encodeURIComponent(message)}`);
+  }
+});
+
+app.get("/articles/:id/link-shopify", async (req: AuthedRequest, res) => {
+  const id = Number(req.params.id);
+  const [article, settings] = await Promise.all([getArticle(db, id), getSettings(db)]);
+  if (!article) return res.status(404).send("Not found");
+  res.send(layout({
+    active: "/articles",
+    config,
+    embedded: isEmbedded(req),
+    csrf: getCsrf(req),
+    content: linkShopifyPage({ article, settings, csrf: getCsrf(req) })
+  }));
+});
+
+app.post("/articles/:id/link-shopify/search", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const [article, settings] = await Promise.all([getArticle(db, id), getSettings(db)]);
+  if (!article) return res.status(404).send("Not found");
+  try {
+    const blog = await resolveBlog(config, settings);
+    const found = await findArticleByHandle(config, blog.id, article.handle, settings.storefrontUrl || config.STOREFRONT_URL);
+    if (!found) {
+      return res.send(layout({
+        active: "/articles",
+        config,
+        csrf: getCsrf(req),
+        content: linkShopifyPage({
+          article,
+          settings,
+          csrf: getCsrf(req),
+          error: `No Shopify article with exact handle “${article.handle}” was found in blog “${blog.title}”.`
+        })
+      }));
+    }
+    await recordAudit(db, {
+      actor: actor(req),
+      action: "shopify_link_candidate_shown",
+      articleId: id,
+      detail: { shopifyArticleId: found.id, handle: found.handle }
+    });
+    res.send(layout({
+      active: "/articles",
+      config,
+      csrf: getCsrf(req),
+      content: linkShopifyPage({
+        article,
+        settings,
+        csrf: getCsrf(req),
+        candidate: {
+          id: found.id,
+          title: found.title ?? null,
+          handle: found.handle ?? null,
+          isPublished: found.isPublished ?? null,
+          url: found.url,
+          blogHandle: found.blog?.handle ?? null
+        }
+      })
+    }));
+  } catch (error) {
+    res.send(layout({
+      active: "/articles",
+      config,
+      csrf: getCsrf(req),
+      content: linkShopifyPage({
+        article,
+        settings,
+        csrf: getCsrf(req),
+        error: safeShopifyErrorMessage(error)
+      })
+    }));
+  }
+});
+
+app.post("/articles/:id/link-shopify/confirm", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const confirmed = String(req.body.confirm || "") === "1";
+  const shopifyArticleId = String(req.body.shopifyArticleId || "");
+  const [article, settings] = await Promise.all([getArticle(db, id), getSettings(db)]);
+  if (!article) return res.status(404).send("Not found");
+  if (!confirmed || !shopifyArticleId) {
+    return res.redirect(`/articles/${id}/link-shopify?error=${encodeURIComponent("Confirmation required before linking.")}`);
+  }
+
+  try {
+    const blog = await resolveBlog(config, settings);
+    const found = await findArticleByHandle(config, blog.id, article.handle, settings.storefrontUrl || config.STOREFRONT_URL);
+    if (!found || found.id !== shopifyArticleId) {
+      return res.send(layout({
+        active: "/articles",
+        config,
+        csrf: getCsrf(req),
+        content: linkShopifyPage({
+          article,
+          settings,
+          csrf: getCsrf(req),
+          error: "The Shopify article could not be re-verified. Search again and confirm the exact match."
+        })
+      }));
+    }
+
+    const linked = await linkArticleToShopify(db, id, {
+      shopifyArticleId: found.id,
+      shopifyBlogId: found.blog?.id ?? blog.id,
+      shopifyHandle: found.handle ?? null,
+      shopifyUrl: found.url,
+      isPublished: Boolean(found.isPublished),
+      publishedAt: found.publishedAt ?? null,
+      responseStatus: "linked"
+    });
+    await recordAudit(db, {
+      actor: actor(req),
+      action: "shopify_article_linked",
+      articleId: id,
+      detail: {
+        shopifyArticleId: found.id,
+        handle: found.handle,
+        url: found.url,
+        isPublished: found.isPublished
+      }
+    });
+    res.redirect(`/articles/${linked!.id}?notice=${encodeURIComponent("Linked existing Shopify article. Future publishes will use articleUpdate.")}`);
+  } catch (error) {
+    res.redirect(`/articles/${id}/link-shopify?error=${encodeURIComponent(safeShopifyErrorMessage(error))}`);
   }
 });
 
