@@ -52,6 +52,7 @@ import {
   loginPage,
   newArticlePage,
   overviewPage,
+  researchOverlapRejectedPage,
   researchPage,
   settingsPage,
   esc
@@ -60,10 +61,10 @@ import type { ArticleContent, GenerationSettings, Settings } from "./types.js";
 import {
   applyInterviewAnswers,
   attachBriefArticle,
-  briefFromCustomTopic,
   buildArticleBrief,
   CONTENT_PILLARS,
   createInterviewDraft,
+  evaluateCustomTopic,
   getBrief,
   getEvidenceReportForArticle,
   getInterviewForBrief,
@@ -72,6 +73,7 @@ import {
   latestCycleMeta,
   listOpportunities,
   listPillarUsage,
+  loadContentInventory,
   markOpportunityStatus,
   qualityGatesPassed,
   recordPillarUsage,
@@ -333,24 +335,11 @@ app.post("/research/run", async (req: AuthedRequest, res) => {
     return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
   }
   try {
-    const { products, warning } = await getProductLinks(config, settings.storefrontUrl).catch(() => ({
-      products: [] as Awaited<ReturnType<typeof getProductLinks>>["products"],
-      warning: "Product lookup failed."
-    }));
-    const articles = await listArticles(db, { pageSize: 50, status: "all" });
-    const existingArticles = articles.items.map(a => ({
-      id: a.id,
-      title: a.title,
-      handle: a.handle,
-      status: a.status,
-      primaryKeyword: a.primaryKeyword,
-      topicFingerprint: a.topicFingerprint,
-      excerpt: a.excerpt
-    }));
+    const inventory = await loadContentInventory({ db, config, settings });
     const usage = await listPillarUsage(db, 60);
     const result = await runResearchCycle({
-      products: products.map(p => ({ title: p.title, url: p.url, handle: p.handle })),
-      existingArticles,
+      products: inventory.products,
+      existingArticles: inventory.existing,
       usage,
       settings: researchSettingsFromApp(settings.research),
       env: process.env
@@ -362,7 +351,8 @@ app.post("/research/run", async (req: AuthedRequest, res) => {
       detail: {
         opportunityCount: result.opportunities.length,
         missingProviders: result.missingProviders,
-        warning: warning || null
+        inventory: inventory.counts,
+        warnings: inventory.warnings
       }
     });
 
@@ -378,13 +368,17 @@ app.post("/research/run", async (req: AuthedRequest, res) => {
 
     const brief = await saveBrief(db, buildArticleBrief(reserved, {
       businessFacts: settings.facts,
-      settings: researchSettingsFromApp(settings.research)
+      settings: researchSettingsFromApp(settings.research),
+      products: reserved.productsToFeature
     }));
     if (brief.requiresInterview) {
       const existingInterview = await getInterviewForBrief(db, brief.id!);
       if (!existingInterview) await saveInterview(db, createInterviewDraft(brief.id!));
     }
-    res.redirect(`/research/briefs/${brief.id}`);
+    const notice = inventory.warnings.length
+      ? `Research ready. Warnings: ${inventory.warnings.join(" ")}`
+      : undefined;
+    res.redirect(`/research/briefs/${brief.id}${notice ? `?notice=${encodeURIComponent(notice)}` : ""}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     res.redirect("/research?error=" + encodeURIComponent(message));
@@ -402,9 +396,17 @@ app.get("/research/opportunities/:id", async (req: AuthedRequest, res) => {
   if (!reserved) {
     return res.redirect("/research?error=" + encodeURIComponent("Could not reserve this opportunity. It may already be reserved."));
   }
-  const brief = await saveBrief(db, buildArticleBrief(reserved, {
+  const inventory = await loadContentInventory({ db, config, settings }).catch(() => null);
+  const products = reserved.productsToFeature.length
+    ? reserved.productsToFeature
+    : inventory?.products.filter(p =>
+      reserved.cluster.secondaryKeywords.concat(reserved.cluster.primaryKeyword)
+        .some(k => p.title.toLowerCase().includes(k.toLowerCase().split(" ")[0] || ""))
+    ).slice(0, 3) || [];
+  const brief = await saveBrief(db, buildArticleBrief({ ...reserved, productsToFeature: products }, {
     businessFacts: settings.facts,
-    settings: researchSettingsFromApp(settings.research)
+    settings: researchSettingsFromApp(settings.research),
+    products
   }));
   if (brief.requiresInterview) {
     const existingInterview = await getInterviewForBrief(db, brief.id!);
@@ -420,11 +422,38 @@ app.post("/research/custom", async (req: AuthedRequest, res) => {
   if (topic.length < 4) {
     return res.redirect("/research?error=" + encodeURIComponent("Enter a topic with at least 4 characters."));
   }
-  const brief = await saveBrief(db, briefFromCustomTopic(topic, {
-    businessFacts: settings.facts,
-    settings: researchSettingsFromApp(settings.research)
-  }));
-  res.redirect(`/research/briefs/${brief.id}`);
+  try {
+    const inventory = await loadContentInventory({ db, config, settings });
+    const evaluated = evaluateCustomTopic(topic, {
+      businessFacts: settings.facts,
+      existingArticles: inventory.existing,
+      settings: researchSettingsFromApp(settings.research),
+      products: inventory.products
+    });
+    if (!evaluated.ok) {
+      return res.status(409).send(layout({
+        active: "/research",
+        config,
+        embedded: isEmbedded(req),
+        csrf: getCsrf(req),
+        error: evaluated.message,
+        content: researchOverlapRejectedPage({
+          topic: evaluated.topic,
+          overlap: evaluated.overlap,
+          csrf: getCsrf(req)
+        })
+      }));
+    }
+    const brief = await saveBrief(db, evaluated.brief);
+    if (brief.requiresInterview) {
+      const existingInterview = await getInterviewForBrief(db, brief.id!);
+      if (!existingInterview) await saveInterview(db, createInterviewDraft(brief.id!));
+    }
+    res.redirect(`/research/briefs/${brief.id}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
 });
 
 app.get("/research/briefs/:id", async (req: AuthedRequest, res) => {

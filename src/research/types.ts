@@ -126,6 +126,13 @@ export interface OpportunityScores {
   opportunityScore: number;
 }
 
+export type InventorySource =
+  | "local_article"
+  | "shopify_article"
+  | "product_page"
+  | "reserved_opportunity"
+  | "pending_brief";
+
 export interface OverlapMatch {
   articleId: number | null;
   title: string;
@@ -133,6 +140,20 @@ export interface OverlapMatch {
   status: string;
   score: number;
   reason: string;
+  source?: InventorySource;
+  shopifyArticleId?: string | null;
+  url?: string | null;
+}
+
+export interface FeaturedProduct {
+  id?: string;
+  title: string;
+  handle?: string;
+  url: string;
+  description?: string;
+  productType?: string;
+  options?: string[];
+  retrievedAt?: string;
 }
 
 export interface ResearchOpportunity {
@@ -146,7 +167,7 @@ export interface ResearchOpportunity {
   whyDistinct: string;
   whyFitsLegends: string;
   requiresInterview: boolean;
-  productsToFeature: Array<{ title: string; url: string }>;
+  productsToFeature: FeaturedProduct[];
   proposedTitle: string;
   proposedHandle: string;
   proposedOutline: string[];
@@ -195,7 +216,7 @@ export interface ArticleBrief {
   proposedTitle: string;
   proposedHandle: string;
   proposedOutline: string[];
-  productsToFeature: Array<{ title: string; url: string }>;
+  productsToFeature: FeaturedProduct[];
   internalLinks: string[];
   externalSources: Array<{ url: string; retrievedAt: string; note: string }>;
   freshnessClass: TopicFreshnessClass;

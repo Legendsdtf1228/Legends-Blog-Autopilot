@@ -86,6 +86,10 @@ export interface ProductLink {
   imageUrl?: string | null;
   status?: string;
   available?: boolean;
+  description?: string;
+  productType?: string;
+  options?: string[];
+  retrievedAt?: string;
 }
 
 export interface ArticleContent {

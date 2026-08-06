@@ -1,18 +1,37 @@
-import type { ArticleBrief, LockedFactSheet, ResearchOpportunity, ResearchSettings } from "./types.js";
+import { clusterSignals } from "./cluster.js";
+import { findClosestOverlap, isRejectedByOverlap, type ExistingArticleRef } from "./overlap.js";
 import { AUDIENCE_LABELS, DEFAULT_RESEARCH_SETTINGS } from "./pillars.js";
+import type {
+  ArticleBrief,
+  FeaturedProduct,
+  LockedFactSheet,
+  OverlapMatch,
+  ResearchOpportunity,
+  ResearchSettings,
+  ResearchSignal
+} from "./types.js";
 
 export function buildLockedFactSheet(args: {
   businessFacts: string[];
-  products: Array<{ title: string; url: string; description?: string }>;
+  products: FeaturedProduct[];
   requiresInterview: boolean;
   pillar: string;
 }): LockedFactSheet {
   const productFacts = args.products.flatMap(p => {
-    const facts = [`Product “${p.title}” is available at ${p.url}.`];
+    const facts = [
+      `Product “${p.title}” is available at ${p.url}.`,
+      p.handle ? `Shopify handle: ${p.handle}.` : null,
+      p.productType ? `Shopify product type: ${p.productType}.` : null,
+      p.options?.length ? `Shopify options/variants: ${p.options.join(" | ")}.` : null,
+      p.retrievedAt ? `Shopify product facts retrieved ${p.retrievedAt}.` : null
+    ].filter((f): f is string => Boolean(f));
+
     if (p.description?.trim()) {
-      facts.push(`Approved product description excerpt for ${p.title}: ${p.description.trim().slice(0, 240)}`);
+      facts.push(`Approved Shopify description for ${p.title}: ${p.description.trim().slice(0, 500)}`);
     } else {
-      facts.push(`No additional Shopify description was available for ${p.title}; do not invent product capabilities from the name alone.`);
+      facts.push(
+        `No additional Shopify description was available for ${p.title}; do not invent product capabilities from the name or URL alone.`
+      );
     }
     return facts;
   });
@@ -49,12 +68,17 @@ export function buildArticleBrief(
   args: {
     businessFacts: string[];
     settings?: ResearchSettings;
+    products?: FeaturedProduct[];
   }
 ): ArticleBrief {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
+  const products = (args.products?.length ? args.products : opportunity.productsToFeature).map(p => ({
+    ...p,
+    description: p.description ?? ""
+  }));
   const factSheet = buildLockedFactSheet({
     businessFacts: args.businessFacts,
-    products: opportunity.productsToFeature.map(p => ({ ...p, description: undefined })),
+    products,
     requiresInterview: opportunity.requiresInterview,
     pillar: opportunity.cluster.pillar
   });
@@ -82,7 +106,7 @@ export function buildArticleBrief(
     proposedTitle: opportunity.proposedTitle,
     proposedHandle: opportunity.proposedHandle,
     proposedOutline: opportunity.proposedOutline,
-    productsToFeature: opportunity.productsToFeature,
+    productsToFeature: products,
     internalLinks: opportunity.internalLinks,
     externalSources: opportunity.externalSources,
     freshnessClass: opportunity.freshnessClass,
@@ -93,25 +117,60 @@ export function buildArticleBrief(
   };
 }
 
-export function briefFromCustomTopic(topic: string, args: {
+export function clusterFromCustomTopic(topic: string, collectedAt = new Date()): ReturnType<typeof clusterSignals>[number] {
+  const signal: ResearchSignal = {
+    provider: "seed_catalog",
+    collectedAt: collectedAt.toISOString(),
+    dataPeriodStart: null,
+    dataPeriodEnd: null,
+    geographicRegion: "custom",
+    keyword: topic,
+    topic,
+    volume: null,
+    relativeInterest: null,
+    growth: null,
+    competition: null,
+    sourceUrl: null,
+    completeness: "unavailable",
+    notes: "Merchant-entered custom topic"
+  };
+  const clusters = clusterSignals([signal], []);
+  const cluster = clusters[0];
+  if (!cluster) {
+    throw new Error("Unable to build keyword cluster for custom topic");
+  }
+  return cluster;
+}
+
+export type CustomTopicResult =
+  | { ok: true; brief: ArticleBrief; overlap: OverlapMatch | null }
+  | { ok: false; overlap: OverlapMatch; topic: string; message: string };
+
+/**
+ * Build a custom-topic brief only after the same overlap/cannibalization checks
+ * used for researched opportunities. Never bypasses duplicate protection.
+ */
+export function evaluateCustomTopic(topic: string, args: {
   businessFacts: string[];
+  existingArticles: ExistingArticleRef[];
   settings?: ResearchSettings;
-}): ArticleBrief {
+  products?: FeaturedProduct[];
+}): CustomTopicResult {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
-  const opportunityLike = {
+  const cluster = clusterFromCustomTopic(topic);
+  const overlap = findClosestOverlap(cluster, args.existingArticles);
+  if (isRejectedByOverlap(overlap, settings.overlapRejectThreshold)) {
+    return {
+      ok: false,
+      overlap: overlap!,
+      topic,
+      message: "This topic substantially overlaps an existing article."
+    };
+  }
+
+  const opportunityLike: ResearchOpportunity = {
     id: `custom:${slug(topic)}`,
-    cluster: {
-      id: `custom:${slug(topic)}`,
-      primaryKeyword: topic,
-      secondaryKeywords: [],
-      intent: "informational" as const,
-      pillar: "apparel_business" as const,
-      subcategory: "custom topic",
-      audience: "small_business_owners" as const,
-      format: "how_to" as const,
-      signals: [],
-      missingProviders: []
-    },
+    cluster,
     scores: {
       demandScore: 0,
       growthScore: 0,
@@ -120,30 +179,66 @@ export function briefFromCustomTopic(topic: string, args: {
       rankingOpportunity: 0.4,
       localRelevance: 0.5,
       freshnessScore: 0.5,
-      contentGapScore: 0.7,
-      overlapPenalty: 0,
+      contentGapScore: overlap ? 1 - overlap.score : 0.7,
+      overlapPenalty: overlap?.score ?? 0,
       factualConfidence: 0.5,
       opportunityScore: 0.55
     },
-    freshnessClass: "evergreen" as const,
-    dataCollectedLabel: `Custom topic entered ${new Date().toLocaleDateString("en-US")}. No search metrics invented.`,
-    completeness: "unavailable" as const,
-    closestExisting: null,
-    whyDistinct: "Merchant-entered topic.",
+    freshnessClass: "evergreen",
+    dataCollectedLabel: `Custom topic entered ${new Date().toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      timeZone: "America/New_York"
+    })}. No search metrics invented.`,
+    completeness: "unavailable",
+    closestExisting: overlap,
+    whyDistinct: overlap && overlap.score >= 0.45
+      ? `Related to “${overlap.title}” but merchant asserts a distinct angle (${cluster.intent} / ${cluster.subcategory}).`
+      : "Merchant-entered topic with no close existing match.",
     whyFitsLegends: "Merchant-selected topic pending review.",
-    requiresInterview: false,
-    productsToFeature: [],
+    requiresInterview: settings.requireInterviewForFirstPerson &&
+      (cluster.format === "first_person_story" ||
+        cluster.pillar === "honest_entrepreneurship" ||
+        cluster.pillar === "legends_story"),
+    productsToFeature: (args.products || []).slice(0, 3),
     proposedTitle: topic,
     proposedHandle: slug(topic),
     proposedOutline: ["Introduction", "Key points", "Practical guidance", "Next steps"],
-    internalLinks: [],
+    internalLinks: (args.products || []).slice(0, 3).map(p => p.url),
     externalSources: [],
-    status: "suggested" as const
+    status: "suggested"
   };
-  const brief = buildArticleBrief(opportunityLike, args);
+
+  const brief = buildArticleBrief(opportunityLike, {
+    businessFacts: args.businessFacts,
+    settings,
+    products: args.products
+  });
   brief.customTopic = topic;
   brief.geographicTarget = settings.region;
-  return brief;
+  brief.closestExistingTitle = overlap?.title ?? null;
+  brief.overlapScore = overlap?.score ?? 0;
+  return { ok: true, brief, overlap };
+}
+
+/** @deprecated Prefer evaluateCustomTopic — kept for callers that already passed overlap checks. */
+export function briefFromCustomTopic(topic: string, args: {
+  businessFacts: string[];
+  settings?: ResearchSettings;
+  products?: FeaturedProduct[];
+  existingArticles?: ExistingArticleRef[];
+}): ArticleBrief {
+  const result = evaluateCustomTopic(topic, {
+    businessFacts: args.businessFacts,
+    settings: args.settings,
+    products: args.products,
+    existingArticles: args.existingArticles ?? []
+  });
+  if (!result.ok) {
+    throw new Error(`${result.message} Matching: “${result.overlap.title}” (score ${result.overlap.score}).`);
+  }
+  return result.brief;
 }
 
 function slug(value: string): string {

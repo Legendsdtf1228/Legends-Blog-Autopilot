@@ -1,5 +1,5 @@
 import { jaccard } from "./cluster.js";
-import type { KeywordCluster, OverlapMatch } from "./types.js";
+import type { InventorySource, KeywordCluster, OverlapMatch } from "./types.js";
 
 export interface ExistingArticleRef {
   id: number | null;
@@ -9,6 +9,9 @@ export interface ExistingArticleRef {
   primaryKeyword?: string;
   topicFingerprint?: string;
   excerpt?: string;
+  source?: InventorySource;
+  shopifyArticleId?: string | null;
+  url?: string | null;
 }
 
 export function overlapScore(cluster: KeywordCluster, existing: ExistingArticleRef): OverlapMatch {
@@ -29,7 +32,10 @@ export function overlapScore(cluster: KeywordCluster, existing: ExistingArticleR
       ? "Substantially same keyword/intent as existing content"
       : score >= 0.45
         ? "Related topic; verify distinct question"
-        : "Low overlap"
+        : "Low overlap",
+    source: existing.source,
+    shopifyArticleId: existing.shopifyArticleId ?? null,
+    url: existing.url ?? null
   };
 }
 

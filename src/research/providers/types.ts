@@ -6,7 +6,16 @@ export interface ProviderContext {
   storefrontUrl: string;
   businessFacts: string[];
   existingTopics: string[];
-  products: Array<{ title: string; url: string; handle?: string; description?: string }>;
+  products: Array<{
+    id?: string;
+    title: string;
+    url: string;
+    handle?: string;
+    description?: string;
+    productType?: string;
+    options?: string[];
+    retrievedAt?: string;
+  }>;
   env: NodeJS.ProcessEnv;
 }
 

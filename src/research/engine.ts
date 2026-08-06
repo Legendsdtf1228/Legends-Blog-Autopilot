@@ -171,7 +171,16 @@ export async function runResearchCycle(args: {
         return cluster.secondaryKeywords.concat(cluster.primaryKeyword).some(k => t.includes(k.toLowerCase().split(" ")[0] || ""));
       })
       .slice(0, 3)
-      .map(p => ({ title: p.title, url: p.url }));
+      .map(p => ({
+        id: (p as { id?: string }).id,
+        title: p.title,
+        handle: p.handle,
+        url: p.url,
+        description: p.description || "",
+        productType: (p as { productType?: string }).productType,
+        options: (p as { options?: string[] }).options || [],
+        retrievedAt: (p as { retrievedAt?: string }).retrievedAt || now.toISOString()
+      }));
 
     const requiresInterview = settings.requireInterviewForFirstPerson &&
       (cluster.format === "first_person_story" || cluster.pillar === "honest_entrepreneurship" || cluster.pillar === "legends_story");

@@ -1,6 +1,6 @@
 import type { ArticleRecord, OverviewStats, Settings } from "./types.js";
 import type { AppConfig } from "./config.js";
-import type { ArticleBrief, EvidenceReport, MerchantInterview, ResearchOpportunity } from "./research/types.js";
+import type { ArticleBrief, EvidenceReport, MerchantInterview, OverlapMatch, ResearchOpportunity } from "./research/types.js";
 import { AUDIENCE_LABELS, CONTENT_PILLARS, FORMAT_LABELS } from "./research/pillars.js";
 
 export const esc = (value: unknown) =>
@@ -535,6 +535,42 @@ export function researchPage(args: {
       <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
       <label>Topic<input name="topic" required placeholder="e.g. Cotton vs polyester for school spirit wear"></label>
       <div class="actions"><button type="submit">Build brief from custom topic</button></div>
+    </form>
+  </section>`;
+}
+
+export function researchOverlapRejectedPage(args: {
+  topic: string;
+  overlap: OverlapMatch;
+  csrf: string;
+}) {
+  const match = args.overlap;
+  const link = match.url
+    ? `<a href="${esc(match.url)}" target="_blank" rel="noreferrer">${esc(match.title)}</a>`
+    : match.articleId
+      ? `<a href="/articles/${esc(match.articleId)}">${esc(match.title)}</a>`
+      : esc(match.title);
+
+  return `
+  <section class="card">
+    <h2>Topic overlaps existing content</h2>
+    <p><strong>This topic substantially overlaps an existing article.</strong></p>
+    <p>Entered topic: <em>${esc(args.topic)}</em></p>
+    <dl class="detail-list">
+      <dt>Matching content</dt><dd>${link}</dd>
+      <dt>Handle / ID</dt><dd>${esc(match.handle)}${match.shopifyArticleId ? ` · Shopify ${esc(match.shopifyArticleId)}` : ""}</dd>
+      <dt>Status / source</dt><dd>${esc(match.status)}${match.source ? ` (${esc(match.source)})` : ""}</dd>
+      <dt>Overlap score</dt><dd>${esc(String(match.score))}</dd>
+      <dt>Reason</dt><dd>${esc(match.reason)}</dd>
+    </dl>
+    <p>Refine the angle so it answers a meaningfully different question, or choose a researched opportunity instead.</p>
+    <form method="post" action="/research/custom" class="stack">
+      <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+      <label>Refined topic<input name="topic" required value="${esc(args.topic)}"></label>
+      <div class="actions">
+        <button class="primary" type="submit">Try refined topic</button>
+        <a class="ghost" href="/research">Back to research</a>
+      </div>
     </form>
   </section>`;
 }

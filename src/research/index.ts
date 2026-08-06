@@ -9,3 +9,4 @@ export * from "./brief.js";
 export * from "./quality.js";
 export * from "./interview.js";
 export * from "./store.js";
+export * from "./inventory.js";
