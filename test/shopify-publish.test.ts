@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARTICLE_CREATE_MUTATION,
+  ARTICLE_UPDATE_MUTATION,
   ARTICLE_GRAPHQL_FIELDS,
   buildPublicArticleUrl,
   normalizeStorefrontUrl
@@ -18,6 +19,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 test("no Article GraphQL selection requests onlineStoreUrl", () => {
   assert.equal(ARTICLE_GRAPHQL_FIELDS.includes("onlineStoreUrl"), false);
   assert.equal(ARTICLE_CREATE_MUTATION.includes("onlineStoreUrl"), false);
+  assert.equal(ARTICLE_UPDATE_MUTATION.includes("onlineStoreUrl"), false);
+  assert.match(ARTICLE_UPDATE_MUTATION, /articleUpdate/);
 
   const srcFiles = [
     "src/shopify.ts",

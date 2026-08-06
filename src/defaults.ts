@@ -86,8 +86,45 @@ export const defaultSettings: Settings = {
       apparel_business: 0.15,
       honest_entrepreneurship: 0.15,
       legends_story: 0.1
-    }
-  }
+    },
+    autoThresholds: {
+      overallOpportunityScore: 0.78,
+      businessRelevance: 0.7,
+      topicSpecificity: 0.85,
+      factualConfidence: 0.9,
+      uniqueness: 0.85,
+      conversionRelevance: 0.55,
+      sourceQuality: 0.6,
+      articleQuality: 0.9,
+      internalLinkConfidence: 0.7
+    },
+    minTopicSpecificity: 0.85
+  },
+  rolloutMode: "draft_only",
+  frequencyLimits: {
+    maxArticlesPerCycle: 1,
+    maxPublishedPerRolling7Days: 5,
+    minHoursBetweenPublishes: 18
+  },
+  promotionThresholds: {
+    minConsecutiveReviewedDrafts: 30,
+    minMerchantApprovalRate: 0.9,
+    minShadowAutoDays: 14
+  },
+  promotionProgress: {
+    consecutiveReviewedDrafts: 0,
+    merchantApprovalRate: 0,
+    shadowAutoDays: 0,
+    autoPublishExplicitlyActivated: false
+  },
+  killSwitch: {
+    paused: false,
+    reason: null,
+    recoveryStep: null,
+    triggeredAt: null,
+    consecutiveFailureThreshold: 3
+  },
+  researchCadence: "twice_daily"
 };
 
 export function mergeResearchConfig(raw: Partial<ResearchConfig> | null | undefined): ResearchConfig {
@@ -98,14 +135,22 @@ export function mergeResearchConfig(raw: Partial<ResearchConfig> | null | undefi
     enabled: Boolean(raw?.enabled ?? base.enabled),
     weights: { ...base.weights, ...(raw?.weights ?? {}) },
     pillarBalance: { ...base.pillarBalance, ...(raw?.pillarBalance ?? {}) },
+    autoThresholds: { ...base.autoThresholds, ...(raw?.autoThresholds ?? {}) },
     requireInterviewForFirstPerson: raw?.requireInterviewForFirstPerson ?? base.requireInterviewForFirstPerson,
     freshnessMaxDays: Number(raw?.freshnessMaxDays ?? base.freshnessMaxDays),
-    overlapRejectThreshold: Number(raw?.overlapRejectThreshold ?? base.overlapRejectThreshold)
+    overlapRejectThreshold: Number(raw?.overlapRejectThreshold ?? base.overlapRejectThreshold),
+    minTopicSpecificity: Number(raw?.minTopicSpecificity ?? base.minTopicSpecificity)
   };
 }
 
 export function mergeSettings(raw: Partial<Settings> | null | undefined): Settings {
   const base = { ...defaultSettings, ...(raw ?? {}) };
+  const rolloutMode = (raw?.rolloutMode ?? defaultSettings.rolloutMode) as Settings["rolloutMode"];
+  // Never auto-enable AUTO_PUBLISH from missing/partial settings; require explicit value.
+  const safeRollout =
+    rolloutMode === "auto_publish" && raw?.rolloutMode !== "auto_publish"
+      ? "draft_only"
+      : rolloutMode;
   return {
     ...base,
     facts: Array.isArray(raw?.facts) ? raw!.facts : defaultSettings.facts,
@@ -118,6 +163,12 @@ export function mergeSettings(raw: Partial<Settings> | null | undefined): Settin
     retryLimit: Number(raw?.retryLimit ?? defaultSettings.retryLimit),
     shopifyBlogId: raw?.shopifyBlogId ?? null,
     openaiModel: raw?.openaiModel ?? null,
-    research: mergeResearchConfig(raw?.research)
+    research: mergeResearchConfig(raw?.research),
+    rolloutMode: safeRollout,
+    frequencyLimits: { ...defaultSettings.frequencyLimits, ...(raw?.frequencyLimits ?? {}) },
+    promotionThresholds: { ...defaultSettings.promotionThresholds, ...(raw?.promotionThresholds ?? {}) },
+    promotionProgress: { ...defaultSettings.promotionProgress, ...(raw?.promotionProgress ?? {}) },
+    killSwitch: { ...defaultSettings.killSwitch, ...(raw?.killSwitch ?? {}) },
+    researchCadence: raw?.researchCadence ?? defaultSettings.researchCadence
   };
 }

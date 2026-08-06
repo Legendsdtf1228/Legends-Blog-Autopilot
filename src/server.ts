@@ -26,6 +26,7 @@ import {
   updateArticle
 } from "./db.js";
 import { AutopilotWorker } from "./scheduler.js";
+import { promotionAllowsAutoPublish } from "./autopilot/rollout.js";
 import { getProductLinks, listBlogs, publishArticle, searchProducts, verifyShopify, safeShopifyErrorMessage } from "./shopify.js";
 import { diagnoseOpenAI, generateArticle } from "./writer.js";
 import { fromGenerated, normalizeArticle, toGenerated, validateArticle } from "./content.js";
@@ -297,6 +298,20 @@ app.get("/", async (req: AuthedRequest, res) => {
     openaiOk = false;
   }
 
+  const latestCycleRes = await db.query<{ decision: string; collected_at: string; reasons: string[] }>(
+    `SELECT decision, collected_at, reasons FROM research_cycle_runs ORDER BY id DESC LIMIT 1`
+  ).catch(() => ({ rows: [] as Array<{ decision: string; collected_at: string; reasons: string[] }> }));
+  const publishedWeek = await db.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM articles WHERE status='published' AND published_at >= now() - interval '7 days'`
+  ).catch(() => ({ rows: [{ count: "0" }] }));
+  const latest = latestCycleRes.rows[0]
+    ? {
+        decision: latestCycleRes.rows[0].decision,
+        collectedAt: latestCycleRes.rows[0].collected_at,
+        reasons: latestCycleRes.rows[0].reasons || []
+      }
+    : null;
+
   res.send(layout({
     active: "/",
     config,
@@ -304,7 +319,17 @@ app.get("/", async (req: AuthedRequest, res) => {
     csrf: getCsrf(req),
     notice: req.query.notice ? String(req.query.notice) : undefined,
     error: req.query.error ? String(req.query.error) : undefined,
-    content: overviewPage({ settings, stats, shopifyOk, openaiOk, shopName, blogName, csrf: getCsrf(req) })
+    content: overviewPage({
+      settings,
+      stats,
+      shopifyOk,
+      openaiOk,
+      shopName,
+      blogName,
+      csrf: getCsrf(req),
+      latestCycle: latest,
+      publishedLast7Days: Number(publishedWeek.rows[0]?.count ?? 0)
+    })
   }));
 });
 
@@ -444,6 +469,9 @@ app.post("/research/custom", async (req: AuthedRequest, res) => {
       products: inventory.products
     });
     if (!evaluated.ok) {
+      if (!evaluated.overlap) {
+        return res.redirect("/research?error=" + encodeURIComponent(evaluated.message));
+      }
       return res.status(409).send(layout({
         active: "/research",
         config,
@@ -996,10 +1024,6 @@ app.post("/articles/:id/publish", async (req: AuthedRequest, res) => {
   const settings = await getSettings(db);
   const article = await getArticle(db, id);
   if (!article) return res.status(404).send("Not found");
-  if (article.shopifyArticleId) {
-    return res.redirect(`/articles/${id}?notice=${encodeURIComponent("Already published.")}`);
-  }
-
   const validated = validateArticle(article, { settings, requireReady: true });
   if (!validated.ok) {
     return res.redirect(`/articles/${id}?error=${encodeURIComponent(validated.errors.map(e => e.message).join("; "))}`);
@@ -1011,7 +1035,8 @@ app.post("/articles/:id/publish", async (req: AuthedRequest, res) => {
       imageUrl: article.featuredImageUrl,
       imageAlt: article.featuredImageAlt,
       isPublished: true,
-      idempotencyKey: `publish:${id}`
+      idempotencyKey: `publish:${id}`,
+      existingShopifyArticleId: article.shopifyArticleId
     });
     await updateArticle(db, id, {
       status: "published",
@@ -1023,8 +1048,13 @@ app.post("/articles/:id/publish", async (req: AuthedRequest, res) => {
       publishedAt: new Date(),
       lastError: null
     });
-    await recordAudit(db, { actor: actor(req), action: "article_published_manual", articleId: id, detail: { url: published.url } });
-    res.redirect(`/articles/${id}?notice=${encodeURIComponent("Published to Shopify.")}`);
+    await recordAudit(db, {
+      actor: actor(req),
+      action: article.shopifyArticleId ? "article_updated_manual" : "article_published_manual",
+      articleId: id,
+      detail: { url: published.url, responseStatus: published.responseStatus }
+    });
+    res.redirect(`/articles/${id}?notice=${encodeURIComponent(article.shopifyArticleId ? "Updated on Shopify." : "Published to Shopify.")}`);
   } catch (error) {
     const message = safeShopifyErrorMessage(error);
     await updateArticle(db, id, { status: "failed", lastError: message });
@@ -1167,8 +1197,11 @@ app.post("/settings", async (req: AuthedRequest, res) => {
     enableAiImages: z.string().optional(),
     researchEnabled: z.string().optional(),
     researchRequireInterview: z.string().optional(),
+    clearKillSwitch: z.string().optional(),
     researchRegion: z.string().min(3).max(160).optional(),
     researchFreshnessMaxDays: z.coerce.number().int().min(1).max(365).optional(),
+    rolloutMode: z.enum(["paused", "observe", "draft_only", "shadow_auto", "auto_publish"]).optional(),
+    researchCadence: z.enum(["daily", "twice_daily"]).optional(),
     cadence: z.enum(["daily", "twice_daily"]),
     timezone: z.string().min(3).max(80),
     firstTime: z.string().regex(/^\d{2}:\d{2}$/),
@@ -1186,7 +1219,11 @@ app.post("/settings", async (req: AuthedRequest, res) => {
     wordCountMin: z.coerce.number().int().min(300).max(2500),
     wordCountMax: z.coerce.number().int().min(400).max(3000),
     retryLimit: z.coerce.number().int().min(1).max(8),
-    openaiModel: z.string().max(100).optional()
+    openaiModel: z.string().max(100).optional(),
+    maxPublishedPerRolling7Days: z.coerce.number().int().min(0).max(50).optional(),
+    minHoursBetweenPublishes: z.coerce.number().int().min(0).max(168).optional(),
+    maxArticlesPerCycle: z.coerce.number().int().min(1).max(5).optional(),
+    activateAutoPublish: z.string().optional()
   }).safeParse(req.body);
 
   if (!parsed.success) {
@@ -1199,10 +1236,29 @@ app.post("/settings", async (req: AuthedRequest, res) => {
   }
 
   const blog = blogs.find(b => b.id === parsed.data.shopifyBlogId);
+  let requestedRollout = parsed.data.rolloutMode || current.rolloutMode;
+  const promotion = promotionAllowsAutoPublish({
+    consecutiveReviewedDrafts: current.promotionProgress.consecutiveReviewedDrafts,
+    merchantApprovalRate: current.promotionProgress.merchantApprovalRate,
+    shadowAutoDays: current.promotionProgress.shadowAutoDays,
+    thresholds: current.promotionThresholds
+  });
+  const explicitActivate = Boolean(parsed.data.activateAutoPublish);
+  if (requestedRollout === "auto_publish") {
+    if (!promotion.ok || !explicitActivate) {
+      requestedRollout = current.rolloutMode === "shadow_auto" ? "shadow_auto" : "draft_only";
+    }
+  }
+
+  // Keep production safe: AUTO_PUBLISH cannot silently disable draft-only.
+  const draftOnlyMode = requestedRollout === "auto_publish"
+    ? Boolean(parsed.data.draftOnlyMode)
+    : (parsed.data.draftOnlyMode !== undefined ? Boolean(parsed.data.draftOnlyMode) : true);
+
   const next = mergeSettings({
     ...current,
     enabled: Boolean(parsed.data.enabled),
-    draftOnlyMode: Boolean(parsed.data.draftOnlyMode),
+    draftOnlyMode: requestedRollout === "auto_publish" ? draftOnlyMode : true,
     enableAiImages: Boolean(parsed.data.enableAiImages),
     cadence: parsed.data.cadence,
     timezone: parsed.data.timezone,
@@ -1222,6 +1278,24 @@ app.post("/settings", async (req: AuthedRequest, res) => {
     wordCountMax: parsed.data.wordCountMax,
     retryLimit: parsed.data.retryLimit,
     openaiModel: parsed.data.openaiModel || null,
+    rolloutMode: requestedRollout,
+    researchCadence: parsed.data.researchCadence || current.researchCadence,
+    frequencyLimits: {
+      ...current.frequencyLimits,
+      maxPublishedPerRolling7Days: parsed.data.maxPublishedPerRolling7Days ?? current.frequencyLimits.maxPublishedPerRolling7Days,
+      minHoursBetweenPublishes: parsed.data.minHoursBetweenPublishes ?? current.frequencyLimits.minHoursBetweenPublishes,
+      maxArticlesPerCycle: parsed.data.maxArticlesPerCycle ?? current.frequencyLimits.maxArticlesPerCycle
+    },
+    promotionProgress: {
+      ...current.promotionProgress,
+      autoPublishExplicitlyActivated:
+        requestedRollout === "auto_publish" && explicitActivate && promotion.ok
+          ? true
+          : current.promotionProgress.autoPublishExplicitlyActivated && requestedRollout === "auto_publish"
+    },
+    killSwitch: parsed.data.clearKillSwitch
+      ? { ...current.killSwitch, paused: false, reason: null, recoveryStep: null, triggeredAt: null }
+      : current.killSwitch,
     research: {
       ...current.research,
       enabled: Boolean(parsed.data.researchEnabled),
@@ -1231,9 +1305,25 @@ app.post("/settings", async (req: AuthedRequest, res) => {
     }
   });
 
-  if (next.enabled) worker.emergencyPause(false);
+  // Force safe production posture unless merchant explicitly chose AUTO_PUBLISH and unchecked draft-only.
+  if (next.rolloutMode !== "auto_publish") {
+    next.draftOnlyMode = true;
+    next.promotionProgress.autoPublishExplicitlyActivated = false;
+  }
+
+  if (next.enabled && !next.killSwitch.paused) worker.emergencyPause(false);
+  if (next.killSwitch.paused || next.rolloutMode === "paused") worker.emergencyPause(true);
   await saveSettings(db, next);
-  await recordAudit(db, { actor: actor(req), action: "settings_updated", detail: { enabled: next.enabled, draftOnlyMode: next.draftOnlyMode } });
+  await recordAudit(db, {
+    actor: actor(req),
+    action: "settings_updated",
+    detail: {
+      enabled: next.enabled,
+      draftOnlyMode: next.draftOnlyMode,
+      rolloutMode: next.rolloutMode,
+      killSwitch: next.killSwitch.paused
+    }
+  });
   res.redirect("/settings?saved=1");
 });
 

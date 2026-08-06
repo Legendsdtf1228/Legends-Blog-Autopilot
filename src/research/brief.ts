@@ -1,6 +1,8 @@
 import { clusterSignals } from "./cluster.js";
 import { findClosestOverlap, isRejectedByOverlap, type ExistingArticleRef } from "./overlap.js";
 import { AUDIENCE_LABELS, DEFAULT_RESEARCH_SETTINGS } from "./pillars.js";
+import { assessTopicSpecificity, buildTopicSpecificOutline, suggestRefinement } from "./specificity.js";
+import { buildSeoDeliverables } from "./seo.js";
 import type {
   ArticleBrief,
   FeaturedProduct,
@@ -16,6 +18,7 @@ export function buildLockedFactSheet(args: {
   products: FeaturedProduct[];
   requiresInterview: boolean;
   pillar: string;
+  externalFacts?: LockedFactSheet["externalFacts"];
 }): LockedFactSheet {
   const productFacts = args.products.flatMap(p => {
     const facts = [
@@ -36,11 +39,17 @@ export function buildLockedFactSheet(args: {
     return facts;
   });
 
+  const legendsFacts = [
+    ...args.businessFacts.slice(0, 20),
+    ...productFacts
+  ];
+
   const prohibited = [
     "Do not invent prices, turnaround times, pressing settings, equipment capabilities, or guarantees.",
     "Do not claim a product does something unsupported by Shopify product data or approved business facts.",
     "Do not present color psychology as universal scientific fact.",
-    "Do not invent personal entrepreneurship stories, revenue, employees, or milestones."
+    "Do not invent personal entrepreneurship stories, revenue, employees, or milestones.",
+    "Do not label topics popular/trending/high-volume without verified demand metrics."
   ];
 
   const reviewFlags: string[] = [];
@@ -54,10 +63,17 @@ export function buildLockedFactSheet(args: {
     reviewFlags.push("Garment specifications require current manufacturer/supplier sources; flag stale specs.");
   }
 
+  const externalFacts = args.externalFacts ?? [];
   return {
+    legendsFacts,
     productFacts,
     businessFacts: args.businessFacts.slice(0, 20),
-    sourcedIndustryFacts: [],
+    externalFacts,
+    sourcedIndustryFacts: externalFacts.map(f => ({
+      claim: f.claim,
+      url: f.sourceUrl,
+      retrievedAt: f.retrievedAt
+    })),
     prohibitedClaims: prohibited,
     reviewFlags
   };
@@ -69,6 +85,8 @@ export function buildArticleBrief(
     businessFacts: string[];
     settings?: ResearchSettings;
     products?: FeaturedProduct[];
+    storefrontUrl?: string;
+    blogHandle?: string;
   }
 ): ArticleBrief {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
@@ -80,10 +98,18 @@ export function buildArticleBrief(
     businessFacts: args.businessFacts,
     products,
     requiresInterview: opportunity.requiresInterview,
-    pillar: opportunity.cluster.pillar
+    pillar: opportunity.cluster.pillar,
+    externalFacts: opportunity.externalSources.map(s => ({
+      claim: s.note,
+      sourceTitle: s.title || s.note,
+      sourceUrl: s.url,
+      publisher: s.publisher || "external",
+      retrievedAt: s.retrievedAt,
+      freshness: opportunity.freshnessClass
+    }))
   });
 
-  return {
+  const partial = {
     opportunityId: opportunity.id,
     pillar: opportunity.cluster.pillar,
     subcategory: opportunity.cluster.subcategory,
@@ -93,10 +119,10 @@ export function buildArticleBrief(
     secondaryKeywords: opportunity.cluster.secondaryKeywords,
     searchIntent: opportunity.cluster.intent,
     targetAudienceLabel: AUDIENCE_LABELS[opportunity.cluster.audience],
+    readerQuestion: opportunity.readerQuestion,
     geographicTarget: settings.region,
-    demandEvidence: opportunity.completeness === "unavailable"
-      ? `${opportunity.dataCollectedLabel} No verified volume/growth metrics were available; ranking used relevance and gap signals only.`
-      : `${opportunity.dataCollectedLabel} Opportunity score ${opportunity.scores.opportunityScore}.`,
+    demandEvidence: opportunity.dataCollectedLabel,
+    demandClass: opportunity.demandClass,
     dataCollectedLabel: opportunity.dataCollectedLabel,
     estimatedCompetition: opportunity.scores.rankingOpportunity >= 0.6 ? "Moderate/unknown" : "Unknown — provider unavailable",
     conversionRelevance: `Intent ${opportunity.cluster.intent}; conversion score ${opportunity.scores.conversionIntent}.`,
@@ -104,6 +130,7 @@ export function buildArticleBrief(
     overlapScore: opportunity.closestExisting?.score ?? 0,
     whyDistinct: opportunity.whyDistinct,
     proposedTitle: opportunity.proposedTitle,
+    proposedH1: opportunity.proposedH1 || opportunity.proposedTitle,
     proposedHandle: opportunity.proposedHandle,
     proposedOutline: opportunity.proposedOutline,
     productsToFeature: products,
@@ -112,9 +139,26 @@ export function buildArticleBrief(
     freshnessClass: opportunity.freshnessClass,
     requiresInterview: opportunity.requiresInterview,
     factSheet,
-    status: "pending_review",
-    scores: opportunity.scores
+    decision: opportunity.decision,
+    decisionReasons: opportunity.decisionReasons,
+    failedGates: opportunity.failedGates,
+    automaticPublishingEligible: opportunity.decision === "AUTO_ELIGIBLE",
+    conversionPath: products.length
+      ? `Feature ${products.map(p => p.title).join(", ")} and point to current product pages for options.`
+      : "Trust-building article; no direct product pitch required.",
+    status: "pending_review" as const,
+    scores: opportunity.scores,
+    topicSpecificity: opportunity.topicSpecificity,
+    uniqueness: opportunity.uniqueness
   };
+
+  const seoDeliverables = buildSeoDeliverables({
+    brief: partial,
+    storefrontUrl: args.storefrontUrl || "https://legendsdtf.com",
+    blogHandle: args.blogHandle || "news"
+  });
+
+  return { ...partial, seoDeliverables };
 }
 
 export function clusterFromCustomTopic(topic: string, collectedAt = new Date()): ReturnType<typeof clusterSignals>[number] {
@@ -136,20 +180,15 @@ export function clusterFromCustomTopic(topic: string, collectedAt = new Date()):
   };
   const clusters = clusterSignals([signal], []);
   const cluster = clusters[0];
-  if (!cluster) {
-    throw new Error("Unable to build keyword cluster for custom topic");
-  }
+  if (!cluster) throw new Error("Unable to build keyword cluster for custom topic");
   return cluster;
 }
 
 export type CustomTopicResult =
   | { ok: true; brief: ArticleBrief; overlap: OverlapMatch | null }
-  | { ok: false; overlap: OverlapMatch; topic: string; message: string };
+  | { ok: false; overlap: OverlapMatch; topic: string; message: string }
+  | { ok: false; overlap: null; topic: string; message: string; specificityReasons: string[] };
 
-/**
- * Build a custom-topic brief only after the same overlap/cannibalization checks
- * used for researched opportunities. Never bypasses duplicate protection.
- */
 export function evaluateCustomTopic(topic: string, args: {
   businessFacts: string[];
   existingArticles: ExistingArticleRef[];
@@ -157,7 +196,12 @@ export function evaluateCustomTopic(topic: string, args: {
   products?: FeaturedProduct[];
 }): CustomTopicResult {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
-  const cluster = clusterFromCustomTopic(topic);
+  let cluster = clusterFromCustomTopic(topic);
+  const refinement = suggestRefinement(topic);
+  if (refinement && topic.trim().split(/\s+/).length <= 2) {
+    cluster = clusterFromCustomTopic(refinement.keyword);
+  }
+
   const overlap = findClosestOverlap(cluster, args.existingArticles);
   if (isRejectedByOverlap(overlap, settings.overlapRejectThreshold)) {
     return {
@@ -168,8 +212,32 @@ export function evaluateCustomTopic(topic: string, args: {
     };
   }
 
+  const readerQuestion = refinement?.readerQuestion
+    || `What should readers know about ${cluster.primaryKeyword}?`;
+  const proposedTitle = refinement?.title
+    || `${cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase())}: What Buyers Should Know`;
+  const outline = buildTopicSpecificOutline(cluster, readerQuestion);
+  const specificity = assessTopicSpecificity({
+    primaryKeyword: cluster.primaryKeyword,
+    proposedTitle,
+    outline,
+    audienceLabel: refinement?.audience || AUDIENCE_LABELS[cluster.audience],
+    whyDistinct: "Merchant-entered topic"
+  });
+  if (specificity.score < settings.minTopicSpecificity) {
+    return {
+      ok: false,
+      overlap: null,
+      topic,
+      message: specificity.refinedKeyword
+        ? `Topic is too broad. Try a qualified angle such as “${specificity.refinedKeyword}”.`
+        : "Topic is too broad or generic to generate a useful article.",
+      specificityReasons: specificity.reasons
+    };
+  }
+
   const opportunityLike: ResearchOpportunity = {
-    id: `custom:${slug(topic)}`,
+    id: `custom:${slug(cluster.primaryKeyword)}`,
     cluster,
     scores: {
       demandScore: 0,
@@ -186,15 +254,12 @@ export function evaluateCustomTopic(topic: string, args: {
     },
     freshnessClass: "evergreen",
     dataCollectedLabel: `Custom topic entered ${new Date().toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-      timeZone: "America/New_York"
+      year: "numeric", month: "long", day: "numeric", timeZone: "America/New_York"
     })}. No search metrics invented.`,
     completeness: "unavailable",
     closestExisting: overlap,
     whyDistinct: overlap && overlap.score >= 0.45
-      ? `Related to “${overlap.title}” but merchant asserts a distinct angle (${cluster.intent} / ${cluster.subcategory}).`
+      ? `Related to “${overlap.title}” but merchant asserts a distinct angle.`
       : "Merchant-entered topic with no close existing match.",
     whyFitsLegends: "Merchant-selected topic pending review.",
     requiresInterview: settings.requireInterviewForFirstPerson &&
@@ -202,9 +267,17 @@ export function evaluateCustomTopic(topic: string, args: {
         cluster.pillar === "honest_entrepreneurship" ||
         cluster.pillar === "legends_story"),
     productsToFeature: (args.products || []).slice(0, 3),
-    proposedTitle: topic,
-    proposedHandle: slug(topic),
-    proposedOutline: ["Introduction", "Key points", "Practical guidance", "Next steps"],
+    proposedTitle,
+    proposedH1: proposedTitle,
+    proposedHandle: slug(proposedTitle),
+    proposedOutline: outline,
+    readerQuestion,
+    topicSpecificity: specificity.score,
+    uniqueness: 1 - (overlap?.score ?? 0),
+    demandClass: "editorial_business_opportunity",
+    decision: "DRAFT_ONLY",
+    decisionReasons: ["Merchant-entered topic; draft-only until gates pass."],
+    failedGates: [],
     internalLinks: (args.products || []).slice(0, 3).map(p => p.url),
     externalSources: [],
     status: "suggested"
@@ -216,13 +289,9 @@ export function evaluateCustomTopic(topic: string, args: {
     products: args.products
   });
   brief.customTopic = topic;
-  brief.geographicTarget = settings.region;
-  brief.closestExistingTitle = overlap?.title ?? null;
-  brief.overlapScore = overlap?.score ?? 0;
   return { ok: true, brief, overlap };
 }
 
-/** @deprecated Prefer evaluateCustomTopic — kept for callers that already passed overlap checks. */
 export function briefFromCustomTopic(topic: string, args: {
   businessFacts: string[];
   settings?: ResearchSettings;
@@ -236,7 +305,7 @@ export function briefFromCustomTopic(topic: string, args: {
     existingArticles: args.existingArticles ?? []
   });
   if (!result.ok) {
-    throw new Error(`${result.message} Matching: “${result.overlap.title}” (score ${result.overlap.score}).`);
+    throw new Error(result.message);
   }
   return result.brief;
 }

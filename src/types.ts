@@ -23,6 +23,40 @@ export type ArticleLength = "short" | "medium" | "long" | "custom";
 
 export type SeoBehavior = "auto" | "manual";
 
+export type RolloutMode = "paused" | "observe" | "draft_only" | "shadow_auto" | "auto_publish";
+
+export interface AutoPublishThresholds {
+  overallOpportunityScore: number;
+  businessRelevance: number;
+  topicSpecificity: number;
+  factualConfidence: number;
+  uniqueness: number;
+  conversionRelevance: number;
+  sourceQuality: number;
+  articleQuality: number;
+  internalLinkConfidence: number;
+}
+
+export interface FrequencyLimits {
+  maxArticlesPerCycle: number;
+  maxPublishedPerRolling7Days: number;
+  minHoursBetweenPublishes: number;
+}
+
+export interface PromotionThresholds {
+  minConsecutiveReviewedDrafts: number;
+  minMerchantApprovalRate: number;
+  minShadowAutoDays: number;
+}
+
+export interface KillSwitchConfig {
+  paused: boolean;
+  reason: string | null;
+  recoveryStep: string | null;
+  triggeredAt: string | null;
+  consecutiveFailureThreshold: number;
+}
+
 export interface ResearchConfig {
   enabled: boolean;
   region: string;
@@ -47,6 +81,8 @@ export interface ResearchConfig {
     honest_entrepreneurship: number;
     legends_story: number;
   };
+  autoThresholds: AutoPublishThresholds;
+  minTopicSpecificity: number;
 }
 
 export interface Settings {
@@ -76,6 +112,19 @@ export interface Settings {
   primaryKeywordDefault: string;
   secondaryKeywordsDefault: string[];
   research: ResearchConfig;
+  /** Controlled rollout mode. Production default: draft_only. AUTO_PUBLISH never auto-enabled. */
+  rolloutMode: RolloutMode;
+  frequencyLimits: FrequencyLimits;
+  promotionThresholds: PromotionThresholds;
+  /** Progress toward AUTO_PUBLISH promotion — merchant-updated / tracked. */
+  promotionProgress: {
+    consecutiveReviewedDrafts: number;
+    merchantApprovalRate: number;
+    shadowAutoDays: number;
+    autoPublishExplicitlyActivated: boolean;
+  };
+  killSwitch: KillSwitchConfig;
+  researchCadence: Cadence;
 }
 
 export interface ProductLink {

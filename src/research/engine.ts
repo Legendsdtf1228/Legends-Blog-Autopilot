@@ -1,5 +1,12 @@
 import { slugify } from "../content.js";
+import { validateOrReclassify } from "./classification.js";
 import { clusterSignals } from "./cluster.js";
+import {
+  classifyDemandEvidence,
+  decideTopicOutcome,
+  scorecardFromOpportunity,
+  uniquenessFromOverlap
+} from "./outcomes.js";
 import { findClosestOverlap, isRejectedByOverlap, type ExistingArticleRef } from "./overlap.js";
 import { AUDIENCE_LABELS, CONTENT_PILLARS, DEFAULT_RESEARCH_SETTINGS, FORMAT_LABELS, pillarById } from "./pillars.js";
 import { existingContentProvider } from "./providers/existingContent.js";
@@ -20,13 +27,15 @@ import {
   pillarRotationBonus,
   type UsageRecord
 } from "./rotation.js";
-import { formatCollectedLabel, scoreOpportunity } from "./scoring.js";
+import { demandFromSignals, formatCollectedLabel, growthFromSignals, scoreOpportunity } from "./scoring.js";
+import { assessTopicSpecificity, buildTopicSpecificOutline, suggestRefinement } from "./specificity.js";
 import type {
   DataCompleteness,
   ResearchCycleResult,
   ResearchOpportunity,
   ResearchProviderId,
   ResearchSettings,
+  TopicDecision,
   TopicFreshnessClass
 } from "./types.js";
 
@@ -95,6 +104,22 @@ function fitsLegends(pillar: string, keyword: string): boolean {
   );
 }
 
+function buildTitle(cluster: { primaryKeyword: string; format: string; intent: string; subcategory: string }): string {
+  const refinement = suggestRefinement(cluster.primaryKeyword);
+  if (refinement) return refinement.title;
+  const k = cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase());
+  if (cluster.format === "comparison" || cluster.intent === "commercial") {
+    return `${k}: Which Option Fits Your Apparel Project?`;
+  }
+  if (cluster.format === "first_person_story") {
+    return `${k}: Honest Lessons From Building a Print Business`;
+  }
+  if (cluster.format === "checklist") {
+    return `${k}: A Decision Checklist for Apparel Buyers`;
+  }
+  return `${k}: What ${cluster.subcategory.replace(/\b\w/g, c => c.toUpperCase())} Buyers Should Know`;
+}
+
 export async function runResearchCycle(args: {
   products: ProviderContext["products"];
   existingArticles: ExistingArticleRef[];
@@ -136,15 +161,30 @@ export async function runResearchCycle(args: {
   for (const cluster of clusters) {
     if (!fitsLegends(cluster.pillar, cluster.primaryKeyword)) continue;
 
+    const reclass = validateOrReclassify(cluster.primaryKeyword, {
+      pillar: cluster.pillar,
+      subcategory: cluster.subcategory
+    });
+    cluster.pillar = reclass.pillar;
+    cluster.subcategory = reclass.subcategory;
+
     const pillarDef = pillarById(cluster.pillar);
     cluster.audience = pickRotatedAudience(pillarDef.audiences, args.usage);
     cluster.format = pickRotatedFormat(pillarDef.formats, args.usage);
 
     const closest = findClosestOverlap(cluster, args.existingArticles);
-    if (isRejectedByOverlap(closest, settings.overlapRejectThreshold)) continue;
+    const overlapRejected = isRejectedByOverlap(closest, settings.overlapRejectThreshold);
 
     const demandSignals = cluster.signals.filter(s => s.provider !== "existing_content");
     const completeness = completenessFor(demandSignals, missingIds);
+    const demandMeta = demandFromSignals(demandSignals, { maxVolume, maxInterest });
+    const growthMeta = growthFromSignals(demandSignals);
+    const demandClass = classifyDemandEvidence({
+      usedVolumeMetric: demandMeta.usedMetric,
+      usedGrowthMetric: growthMeta.usedMetric,
+      providersAvailable: PROVIDERS.filter(p => !missingIds.includes(p.id)).map(p => p.id)
+    });
+
     const rotation = pillarRotationBonus(cluster.pillar, args.usage, settings.pillarBalance);
     const dtfBias = avoidRepeatedDtfBias(cluster.pillar, args.usage);
     const business = Math.max(0, Math.min(1,
@@ -185,51 +225,123 @@ export async function runResearchCycle(args: {
     const requiresInterview = settings.requireInterviewForFirstPerson &&
       (cluster.format === "first_person_story" || cluster.pillar === "honest_entrepreneurship" || cluster.pillar === "legends_story");
 
-    const titleBase = cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase());
-    const proposedTitle =
-      cluster.format === "comparison" ? `${titleBase}: A Practical Comparison for Apparel Printers`
-        : cluster.format === "first_person_story" ? `${titleBase}: Lessons From Building a Print Business`
-          : cluster.format === "checklist" ? `${titleBase}: A Practical Checklist`
-            : `A Practical Guide to ${titleBase}`;
+    const refinement = suggestRefinement(cluster.primaryKeyword);
+    // Auto-refine broad seeds into qualified long-tails when possible
+    if (refinement && cluster.primaryKeyword.trim().split(/\s+/).length <= 2) {
+      cluster.primaryKeyword = refinement.keyword;
+      cluster.secondaryKeywords = [...new Set([cluster.primaryKeyword, ...cluster.secondaryKeywords])].slice(0, 8);
+      const again = validateOrReclassify(cluster.primaryKeyword, {
+        pillar: cluster.pillar,
+        subcategory: cluster.subcategory
+      });
+      cluster.pillar = again.pillar;
+      cluster.subcategory = again.subcategory;
+    }
+
+    const proposedTitle = buildTitle(cluster);
+    const readerQuestion = refinement?.readerQuestion
+      || `What should ${AUDIENCE_LABELS[cluster.audience].toLowerCase()} know about ${cluster.primaryKeyword}?`;
+    const proposedOutline = buildTopicSpecificOutline(cluster, readerQuestion);
+
+    const specificity = assessTopicSpecificity({
+      primaryKeyword: cluster.primaryKeyword,
+      proposedTitle,
+      outline: proposedOutline,
+      audienceLabel: refinement?.audience || AUDIENCE_LABELS[cluster.audience],
+      whyDistinct: closest ? `Different angle from “${closest.title}”` : "No close match"
+    });
+
+    const uniqueness = uniquenessFromOverlap(closest?.score ?? 0);
+    const sourceQuality = demandClass === "verified_demand" ? 0.85 : demandClass === "inferred_opportunity" ? 0.55 : 0.45;
+    const scorecard = scorecardFromOpportunity({
+      scores,
+      topicSpecificity: specificity.score,
+      uniqueness,
+      sourceQuality,
+      articleQuality: 0,
+      internalLinkConfidence: productsToFeature.length ? 0.8 : 0.75
+    });
+
+    const outcome = decideTopicOutcome({
+      scorecard,
+      thresholds: settings.autoThresholds,
+      requiresInterview,
+      interviewComplete: false,
+      specificityOk: specificity.score >= settings.minTopicSpecificity && !specificity.reasons.some(r => /Broad one-word|Generic title|placeholder/i.test(r)),
+      overlapRejected,
+      classificationInvalid: false
+    });
+
+    // Skip rejected broad/overlap topics from the candidate list entirely
+    if (outcome.decision === "REJECTED") continue;
+
+    const failedGates = [
+      ...specificity.reasons,
+      ...outcome.reasons.filter(r => outcome.decision !== "AUTO_ELIGIBLE")
+    ];
+
+    const dataLabel = formatCollectedLabel(now, completeness);
+    // Never claim popularity without verified metrics
+    const safeDemandLabel = demandClass === "verified_demand"
+      ? `${dataLabel} Verified demand metrics available.`
+      : `${dataLabel} No verified volume/growth metrics; treated as ${demandClass.replace(/_/g, " ")}.`;
 
     opportunities.push({
       id: cluster.id,
       cluster,
       scores,
       freshnessClass: freshnessClass(cluster.primaryKeyword, cluster.pillar),
-      dataCollectedLabel: formatCollectedLabel(now, completeness),
+      dataCollectedLabel: safeDemandLabel,
       completeness,
       closestExisting: closest,
       whyDistinct: closest && closest.score >= 0.45
-        ? `Related to “${closest.title}” but targets a different angle (${cluster.intent} / ${cluster.subcategory}).`
-        : "No close existing article covers this keyword cluster and intent.",
-      whyFitsLegends: `Fits the ${pillarDef.label} pillar and connects to custom apparel, printing, branding, or entrepreneurship.`,
+        ? `Related to “${closest.title}” but targets a different question (${cluster.intent} / ${cluster.subcategory}): ${readerQuestion}`
+        : `No close existing article answers: ${readerQuestion}`,
+      whyFitsLegends: `Fits the ${pillarDef.label} pillar (${cluster.subcategory}) and connects to custom apparel, printing, branding, or entrepreneurship.`,
       requiresInterview,
       productsToFeature,
       proposedTitle,
+      proposedH1: proposedTitle,
       proposedHandle: slugify(proposedTitle),
-      proposedOutline: [
-        `What ${cluster.primaryKeyword} means for ${AUDIENCE_LABELS[cluster.audience]}`,
-        "Practical steps or comparisons",
-        "Common mistakes to avoid",
-        "How this connects to custom apparel or print production",
-        "Next actions and local CTA when appropriate"
-      ],
+      proposedOutline,
+      readerQuestion,
+      topicSpecificity: specificity.score,
+      uniqueness,
+      demandClass,
+      decision: outcome.decision,
+      decisionReasons: outcome.reasons,
+      failedGates,
       internalLinks: productsToFeature.map(p => p.url),
       externalSources: [],
       status: "suggested"
     });
   }
 
-  opportunities.sort((a, b) => b.scores.opportunityScore - a.scores.opportunityScore);
-  const selected = opportunities[0] ?? null;
+  // Prefer AUTO_ELIGIBLE, then DRAFT_ONLY / NEEDS_MERCHANT_INPUT by score
+  const rank = (d: TopicDecision) =>
+    d === "AUTO_ELIGIBLE" ? 3 : d === "DRAFT_ONLY" ? 2 : d === "NEEDS_MERCHANT_INPUT" ? 1 : 0;
+  opportunities.sort((a, b) =>
+    rank(b.decision) - rank(a.decision) || b.scores.opportunityScore - a.scores.opportunityScore
+  );
+
+  const selected = opportunities.find(o =>
+    o.decision === "AUTO_ELIGIBLE" || o.decision === "DRAFT_ONLY" || o.decision === "NEEDS_MERCHANT_INPUT"
+  ) ?? null;
+
+  const cycleDecision: TopicDecision = selected
+    ? selected.decision
+    : "SKIPPED_NO_QUALIFIED_TOPIC";
 
   return {
     collectedAt: now.toISOString(),
     missingProviders,
     signals: allSignals,
     opportunities,
-    selected
+    selected,
+    cycleDecision,
+    cycleDecisionReasons: selected
+      ? selected.decisionReasons
+      : ["No topic met specificity, uniqueness, and safety requirements. Safe skip."]
   };
 }
 
