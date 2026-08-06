@@ -1,10 +1,59 @@
 import express from "express";
-import crypto from "node:crypto";
+import path from "node:path";
+import rateLimit from "express-rate-limit";
+import helmet from "helmet";
+import multer from "multer";
+import { DateTime } from "luxon";
 import { z } from "zod";
-import { loadConfig } from "./config.js";
-import { createDb, getSettings, insertManualJob, listJobs, migrate, saveSettings } from "./db.js";
+import { loadConfig, redactSecrets } from "./config.js";
+import {
+  cancelScheduledArticle,
+  createArticle,
+  createDb,
+  duplicateArticle,
+  getArticle,
+  getOverviewStats,
+  getSettings,
+  insertManualJob,
+  listArticles,
+  listAudit,
+  listJobs,
+  migrate,
+  recentTopicContext,
+  recordAudit,
+  saveSettings,
+  scheduleArticleJob,
+  updateArticle
+} from "./db.js";
 import { AutopilotWorker } from "./scheduler.js";
-import { verifyShopify } from "./shopify.js";
+import { getProductLinks, listBlogs, publishArticle, searchProducts, verifyShopify, safeShopifyErrorMessage } from "./shopify.js";
+import { diagnoseOpenAI, generateArticle } from "./writer.js";
+import { fromGenerated, normalizeArticle, toGenerated, validateArticle } from "./content.js";
+import { mergeSettings } from "./defaults.js";
+import {
+  clearSessionCookie,
+  createAuthMiddleware,
+  createDbSession,
+  csrfTokenFromSession,
+  destroyDbSession,
+  parseCookies,
+  setSessionCookie,
+  verifyCsrf,
+  verifyShopifySessionToken,
+  type AuthedRequest
+} from "./auth.js";
+import {
+  articleEditorPage,
+  articlesListPage,
+  diagnosticsPage,
+  layout,
+  loginPage,
+  newArticlePage,
+  overviewPage,
+  settingsPage,
+  esc
+} from "./views.js";
+import type { ArticleContent, GenerationSettings, Settings } from "./types.js";
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL);
@@ -14,82 +63,872 @@ worker.start();
 
 const app = express();
 app.disable("x-powered-by");
-app.use(express.urlencoded({ extended: false, limit: "100kb" }));
-app.use(express.json({ limit: "100kb" }));
+if (config.TRUST_PROXY) app.set("trust proxy", 1);
 
-function safeEqual(a: string, b: string): boolean {
-  const x = Buffer.from(a); const y = Buffer.from(b);
-  return x.length === y.length && crypto.timingSafeEqual(x, y);
-}
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      "default-src": ["'self'"],
+      "script-src": ["'self'", "https://cdn.shopify.com", "'unsafe-inline'"],
+      "style-src": ["'self'", "'unsafe-inline'"],
+      "img-src": ["'self'", "data:", "https:"],
+      "connect-src": ["'self'", "https://cdn.shopify.com"],
+      "frame-ancestors": ["https://admin.shopify.com", "https://*.myshopify.com", "'self'"],
+      "base-uri": ["'self'"]
+    }
+  },
+  // Allow embedding in Shopify Admin
+  frameguard: false,
+  crossOriginEmbedderPolicy: false
+}));
 
-function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const auth = req.headers.authorization;
-  if (auth?.startsWith("Basic ")) {
-    const [, password = ""] = Buffer.from(auth.slice(6), "base64").toString().split(":", 2);
-    if (safeEqual(password, config.ADMIN_PASSWORD)) return next();
+app.use((req, res, next) => {
+  res.setHeader("Content-Security-Policy", [
+    "default-src 'self'",
+    "script-src 'self' https://cdn.shopify.com 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https:",
+    "connect-src 'self' https://cdn.shopify.com",
+    "frame-ancestors https://admin.shopify.com https://*.myshopify.com 'self'",
+    "base-uri 'self'"
+  ].join("; "));
+  next();
+});
+
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
+app.use(express.json({ limit: "1mb" }));
+app.use("/assets", express.static(path.join(process.cwd(), "public/assets"), { maxAge: "1h" }));
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter(_req, file, cb) {
+    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.mimetype)) {
+      return cb(new Error("Only PNG, JPEG, WebP, or GIF images are allowed"));
+    }
+    cb(null, true);
   }
-  res.setHeader("WWW-Authenticate", 'Basic realm="Legends Blog Autopilot"');
-  return res.status(401).send("Authentication required");
+});
+
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false });
+
+function actor(req: AuthedRequest): string {
+  return req.auth?.user || "unknown";
 }
 
-const esc = (value: unknown) => String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[c]!);
-const checked = (value: boolean) => value ? "checked" : "";
-const selected = (a: string, b: string) => a === b ? "selected" : "";
-
-function layout(content: string) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Legends Blog Autopilot</title><style>
-  :root{--ink:#17191c;--muted:#69717d;--paper:#f5f2ea;--card:#fff;--orange:#ef6c35;--green:#1f7651;--line:#dedbd3}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif}.top{background:#16181a;color:#fff;padding:24px 0;border-bottom:5px solid var(--orange)}main,.top>div{width:min(1120px,calc(100% - 32px));margin:auto}.brand{font-size:24px;font-weight:850;letter-spacing:-.03em}.sub{color:#bfc4ca;margin-top:2px}.grid{display:grid;grid-template-columns:1.05fr .95fr;gap:20px;margin:24px auto}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px;box-shadow:0 4px 14px #00000009}.wide{grid-column:1/-1}h2{margin:0 0 16px;font-size:18px}label{display:block;font-weight:700;margin:13px 0 5px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}input,select,textarea,button{font:inherit}input,select,textarea{width:100%;padding:10px 11px;border:1px solid #c9c7c1;border-radius:8px;background:#fff}textarea{min-height:145px;resize:vertical}.toggle{display:flex;gap:10px;align-items:center;margin-bottom:14px}.toggle input{width:auto;accent-color:var(--green)}button{border:0;border-radius:9px;padding:11px 16px;background:var(--ink);color:white;font-weight:800;cursor:pointer}.primary{background:var(--green)}.danger{background:#9e342c}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}.status{display:inline-flex;padding:4px 9px;border-radius:999px;font-weight:800;font-size:12px;background:#e8e8e5}.published{background:#dcefe4;color:#145d3d}.failed{background:#f7dedb;color:#8b2d28}.running{background:#fff0c7;color:#795b00}.metric{font-size:30px;font-weight:850}.muted{color:var(--muted)}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #ece9e2;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:var(--muted)}a{color:#176a4a}.notice{padding:11px 13px;border-radius:8px;background:#e6f2ea;color:#185b3e;margin-bottom:16px}.error{background:#f8dfdc;color:#852e28}@media(max-width:780px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}.row{grid-template-columns:1fr}table{font-size:12px}.hide-mobile{display:none}}
-  </style></head><body><header class="top"><div><div class="brand">LEGENDS BLOG AUTOPILOT</div><div class="sub">Hands-off Shopify content for Legends DTF Prints</div></div></header><main>${content}</main></body></html>`;
+function isEmbedded(req: express.Request): boolean {
+  return Boolean(req.query.embedded || req.query.shop || req.headers["sec-fetch-dest"] === "iframe");
 }
 
-app.get("/health", async (_req, res) => {
-  try { await db.query("SELECT 1"); res.json({ ok: true }); } catch { res.status(503).json({ ok: false }); }
+function csrfKey(req: AuthedRequest): string {
+  const sid = parseCookies(req.headers.cookie).lba_session;
+  if (sid) return sid;
+  if (req.auth?.mode === "basic") return `basic:${req.auth.user}`;
+  if (req.auth?.mode === "shopify_session_token") return `shopify:${req.auth.shop || req.auth.user}`;
+  return "anonymous";
+}
+
+function getCsrf(req: AuthedRequest): string {
+  return csrfTokenFromSession(csrfKey(req), config.SESSION_SECRET);
+}
+
+function requireCsrf(req: AuthedRequest, res: express.Response): boolean {
+  // Bearer Shopify session-token requests are CSRF-resistant (custom header)
+  if (req.auth?.mode === "shopify_session_token") return true;
+  if (req.headers.authorization?.startsWith("Bearer ")) return true;
+  const token = String(req.body?._csrf || req.headers["x-csrf-token"] || "");
+  if (verifyCsrf(csrfKey(req), token, config.SESSION_SECRET)) return true;
+  res.status(403).send(layout({
+    active: "/",
+    config,
+    content: `<section class="card"><div class="notice error">Invalid CSRF token. Reload the page and try again.</div><a href="/">Back</a></section>`
+  }));
+  return false;
+}
+
+function parseTags(value: unknown): string[] {
+  return String(value ?? "").split(",").map(s => s.trim()).filter(Boolean);
+}
+
+function bodyToContent(body: Record<string, unknown>, settings: Settings): Partial<ArticleContent> {
+  return {
+    title: String(body.title ?? ""),
+    handle: String(body.handle ?? ""),
+    excerpt: String(body.excerpt ?? ""),
+    metaTitle: String(body.metaTitle ?? body.title ?? ""),
+    metaDescription: String(body.metaDescription ?? ""),
+    bodyHtml: String(body.bodyHtml ?? ""),
+    tags: parseTags(body.tags),
+    author: String(body.author ?? settings.authorName),
+    featuredImageUrl: String(body.featuredImageUrl ?? "") || null,
+    featuredImageAlt: String(body.featuredImageAlt ?? "") || null,
+    primaryKeyword: String(body.primaryKeyword ?? ""),
+    secondaryKeywords: parseTags(body.secondaryKeywords),
+    topicFingerprint: String(body.topicFingerprint ?? ""),
+    rationale: String(body.rationale ?? "")
+  };
+}
+
+function localToUtc(local: string, timezone: string): Date | null {
+  if (!local) return null;
+  const dt = DateTime.fromISO(local, { zone: timezone });
+  return dt.isValid ? dt.toUTC().toJSDate() : null;
+}
+
+// ---- Public health ----
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "legends-blog-autopilot", ts: new Date().toISOString() });
 });
 
-app.use(requireAdmin);
-
-app.get("/", async (req, res) => {
-  const [settings, jobs] = await Promise.all([getSettings(db), listJobs(db)]);
-  const published = jobs.filter(j => j.status === "published").length;
-  const nextLabel = settings.cadence === "daily" ? settings.firstTime : `${settings.firstTime} & ${settings.secondTime}`;
-  const message = req.query.saved ? '<div class="notice">Settings saved.</div>' : req.query.queued ? '<div class="notice">A publish-now job was queued.</div>' : "";
-  const rows = jobs.map(job => `<tr><td><span class="status ${esc(job.status)}">${esc(job.status)}</span></td><td>${esc(new Date(job.scheduled_for).toLocaleString("en-US", {timeZone: settings.timezone}))}</td><td>${job.article ? esc(job.article.title) : '<span class="muted">Waiting to generate</span>'}</td><td class="hide-mobile">${esc(job.attempts)}</td><td>${job.shopify_url ? `<a href="${esc(job.shopify_url)}" target="_blank" rel="noreferrer">View</a>` : job.error ? `<span title="${esc(job.error)}">Error</span>` : "—"}</td></tr>`).join("");
-  res.send(layout(`${message}<div class="grid">
-    <section class="card"><h2>Autopilot status</h2><div class="row"><div><div class="muted">Current state</div><div class="metric">${settings.enabled ? "Live" : "Paused"}</div></div><div><div class="muted">Publishing schedule</div><div class="metric" style="font-size:22px">${esc(nextLabel)}</div><div class="muted">${esc(settings.timezone)}</div></div></div>
-      <form method="post" action="/publish-now" class="actions"><button class="primary">Publish now</button></form></section>
-    <section class="card"><h2>Recent activity</h2><div class="metric">${published}</div><div class="muted">published in the latest ${jobs.length} jobs</div><p class="muted">Failed jobs retry automatically up to four times with backoff.</p></section>
-    <section class="card wide"><h2>Settings</h2><form method="post" action="/settings">
-      <label class="toggle"><input type="checkbox" name="enabled" ${checked(settings.enabled)}> Automatic publishing enabled</label>
-      <div class="row"><div><label>Cadence</label><select name="cadence"><option value="daily" ${selected(settings.cadence,"daily")}>Once daily</option><option value="twice_daily" ${selected(settings.cadence,"twice_daily")}>Twice daily</option></select></div><div><label>Timezone</label><input name="timezone" value="${esc(settings.timezone)}"></div></div>
-      <div class="row"><div><label>First publish time</label><input type="time" name="firstTime" value="${esc(settings.firstTime)}"></div><div><label>Second publish time</label><input type="time" name="secondTime" value="${esc(settings.secondTime)}"></div></div>
-      <div class="row"><div><label>Minimum words</label><input type="number" name="wordCountMin" min="500" max="2500" value="${settings.wordCountMin}"></div><div><label>Maximum words</label><input type="number" name="wordCountMax" min="700" max="3000" value="${settings.wordCountMax}"></div></div>
-      <label>Article author</label><input name="authorName" value="${esc(settings.authorName)}">
-      <div class="row"><div><label>Approved business facts (one per line)</label><textarea name="facts">${esc(settings.facts.join("\n"))}</textarea></div><div><label>Content pillars (one per line)</label><textarea name="contentPillars">${esc(settings.contentPillars.join("\n"))}</textarea></div></div>
-      <div class="actions"><button>Save settings</button></div></form></section>
-    <section class="card wide"><h2>Publishing history</h2><div style="overflow:auto"><table><thead><tr><th>Status</th><th>Scheduled</th><th>Article</th><th class="hide-mobile">Attempts</th><th>Result</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">No jobs yet.</td></tr>'}</tbody></table></div></section>
-  </div>`));
+app.get("/ready", async (_req, res) => {
+  try {
+    await db.query("SELECT 1");
+    res.json({ ok: true, database: true });
+  } catch (error) {
+    res.status(503).json({ ok: false, database: false, error: "database unavailable" });
+  }
 });
 
-const settingsSchema = z.object({
-  enabled: z.string().optional().transform(Boolean), cadence: z.enum(["daily", "twice_daily"]),
-  timezone: z.string().min(3).max(80), firstTime: z.string().regex(/^\d{2}:\d{2}$/), secondTime: z.string().regex(/^\d{2}:\d{2}$/),
-  authorName: z.string().min(2).max(100), wordCountMin: z.coerce.number().int().min(500).max(2500), wordCountMax: z.coerce.number().int().min(700).max(3000),
-  facts: z.string().transform(v => v.split(/\r?\n/).map(s => s.trim()).filter(Boolean)), contentPillars: z.string().transform(v => v.split(/\r?\n/).map(s => s.trim()).filter(Boolean))
-}).refine(v => v.wordCountMax >= v.wordCountMin, "Maximum words must be at least minimum words");
-
-app.post("/settings", async (req, res) => {
-  const parsed = settingsSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).send(layout(`<div class="grid"><section class="card wide"><div class="notice error">${esc(parsed.error.issues.map(i => i.message).join("; "))}</div><a href="/">Return to settings</a></section></div>`));
-  await saveSettings(db, parsed.data);
-  res.redirect("/?saved=1");
+// ---- Login (standalone) ----
+app.get("/login", (req, res) => {
+  res.send(loginPage(config, { next: String(req.query.next || "/"), error: req.query.error ? String(req.query.error) : undefined }));
 });
 
-app.post("/publish-now", async (_req, res) => { await insertManualJob(db); void worker.tick(); res.redirect("/?queued=1"); });
-app.get("/api/status", async (_req, res) => res.json({ settings: await getSettings(db), jobs: await listJobs(db, 20) }));
-app.get("/api/verify-shopify", async (_req, res) => { try { res.json({ ok: true, ...(await verifyShopify(config)) }); } catch (error) { res.status(502).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); } });
+app.post("/login", loginLimiter, async (req, res) => {
+  const username = String(req.body.username || "");
+  const password = String(req.body.password || "");
+  const next = String(req.body.next || "/");
+  if (username === config.ADMIN_USERNAME && password === config.ADMIN_PASSWORD) {
+    const sid = await createDbSession(db, { user: username, mode: "session" });
+    setSessionCookie(res, config, sid, false);
+    await recordAudit(db, { actor: username, action: "login_standalone", detail: {} });
+    return res.redirect(next.startsWith("/") ? next : "/");
+  }
+  return res.redirect(`/login?error=${encodeURIComponent("Invalid username or password")}&next=${encodeURIComponent(next)}`);
+});
 
-const server = app.listen(config.PORT, () => console.log(`Legends Blog Autopilot listening on ${config.PORT}`));
-async function shutdown() { worker.stop(); server.close(); await db.end(); }
+app.post("/api/auth/session-token", apiLimiter, async (req, res) => {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+    const verified = await verifyShopifySessionToken(token, config);
+    const sid = await createDbSession(db, {
+      user: verified.sub || "shopify-user",
+      mode: "shopify_session_token",
+      shop: verified.shop
+    });
+    setSessionCookie(res, config, sid, true);
+    await recordAudit(db, { actor: verified.sub || "shopify-user", action: "login_shopify_session_token", detail: { shop: verified.shop } });
+    res.json({ ok: true, shop: verified.shop });
+  } catch (error) {
+    res.setHeader("X-Shopify-Retry-Invalid-Session-Request", "1");
+    res.status(401).json({ ok: false, error: "Invalid Shopify session token" });
+  }
+});
+
+app.get("/logout", async (req, res) => {
+  const sid = parseCookies(req.headers.cookie).lba_session;
+  if (sid) await destroyDbSession(db, sid);
+  clearSessionCookie(res, config);
+  res.redirect("/login");
+});
+
+const requireAuth = createAuthMiddleware(config, db);
+
+app.use(apiLimiter);
+app.use(requireAuth);
+
+// ---- Overview ----
+app.get("/", async (req: AuthedRequest, res) => {
+  const [settings, stats] = await Promise.all([getSettings(db), getOverviewStats(db)]);
+  let shopifyOk: boolean | undefined;
+  let openaiOk: boolean | undefined;
+  let shopName: string | undefined;
+  let blogName: string | undefined;
+  try {
+    const v = await verifyShopify(config, settings);
+    shopifyOk = v.ok;
+    shopName = v.shop;
+    blogName = v.selectedBlog?.title;
+  } catch {
+    shopifyOk = false;
+  }
+  try {
+    const o = await diagnoseOpenAI(config.OPENAI_API_KEY, settings.openaiModel || config.OPENAI_MODEL);
+    openaiOk = o.ok;
+  } catch {
+    openaiOk = false;
+  }
+
+  res.send(layout({
+    active: "/",
+    config,
+    embedded: isEmbedded(req),
+    csrf: getCsrf(req),
+    notice: req.query.notice ? String(req.query.notice) : undefined,
+    error: req.query.error ? String(req.query.error) : undefined,
+    content: overviewPage({ settings, stats, shopifyOk, openaiOk, shopName, blogName, csrf: getCsrf(req) })
+  }));
+});
+
+app.post("/autopilot/pause", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  settings.enabled = false;
+  await saveSettings(db, settings);
+  worker.emergencyPause(true);
+  await recordAudit(db, { actor: actor(req), action: "emergency_pause" });
+  res.redirect("/?notice=" + encodeURIComponent("Autopilot paused."));
+});
+
+// ---- Articles ----
+app.get("/articles", async (req: AuthedRequest, res) => {
+  const settings = await getSettings(db);
+  const q = String(req.query.q || "");
+  const status = String(req.query.status || "all");
+  const page = Number(req.query.page || 1);
+  const result = await listArticles(db, {
+    q,
+    status: status as never,
+    page,
+    pageSize: 20,
+    sort: "updated"
+  });
+  res.send(layout({
+    active: "/articles",
+    config,
+    embedded: isEmbedded(req),
+    csrf: getCsrf(req),
+    notice: req.query.notice ? String(req.query.notice) : undefined,
+    error: req.query.error ? String(req.query.error) : undefined,
+    content: articlesListPage({
+      items: result.items,
+      total: result.total,
+      page: result.page,
+      pageSize: result.pageSize,
+      q,
+      status,
+      timezone: settings.timezone
+    })
+  }));
+});
+
+app.get("/articles/new", async (req: AuthedRequest, res) => {
+  const settings = await getSettings(db);
+  const { warning } = await getProductLinks(config, settings.storefrontUrl).catch(() => ({ products: [], warning: "Product lookup failed." }));
+  res.send(layout({
+    active: "/articles/new",
+    config,
+    embedded: isEmbedded(req),
+    csrf: getCsrf(req),
+    content: newArticlePage({ settings, csrf: getCsrf(req), productsWarning: warning })
+  }));
+});
+
+app.post("/articles", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  const raw = bodyToContent(req.body, settings);
+  const normalized = normalizeArticle(raw, { author: settings.authorName });
+  const intent = String(req.body.intent || "save");
+  const requireReady = intent === "ready";
+  const validated = validateArticle(normalized.content, { settings, requireReady });
+  if (!validated.ok || !validated.content) {
+    return res.status(400).send(layout({
+      active: "/articles/new",
+      config,
+      error: "Please fix the highlighted fields.",
+      content: articleEditorPage({
+        article: {
+          ...normalized.content,
+          id: 0,
+          status: "draft",
+          scheduledFor: null,
+          publishedAt: null,
+          shopifyBlogId: null,
+          shopifyArticleId: null,
+          shopifyHandle: null,
+          shopifyUrl: null,
+          shopifyResponseStatus: null,
+          generationError: null,
+          lastError: null,
+          idempotencyKey: null,
+          source: "manual",
+          merchantEdited: true,
+          merchantEditedFields: [],
+          generationSettings: null,
+          createdAt: new Date(),
+          updatedAt: new Date()
+        },
+        settings,
+        mode: "new",
+        fieldErrors: validated.errors,
+        csrf: getCsrf(req)
+      })
+    }));
+  }
+  const article = await createArticle(db, validated.content, {
+    status: requireReady ? "ready" : "draft",
+    source: "manual"
+  });
+  await recordAudit(db, { actor: actor(req), action: "article_created", articleId: article.id });
+  res.redirect(`/articles/${article.id}?notice=${encodeURIComponent("Draft saved.")}`);
+});
+
+app.post("/articles/generate", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  const generation: GenerationSettings = {
+    topic: String(req.body.topic || ""),
+    articleType: String(req.body.articleType || "educational guide"),
+    primaryKeyword: String(req.body.primaryKeyword || settings.primaryKeywordDefault),
+    secondaryKeywords: parseTags(req.body.secondaryKeywords),
+    desiredLength: (String(req.body.desiredLength || "medium") as GenerationSettings["desiredLength"]),
+    callToAction: String(req.body.callToAction || settings.defaultCta),
+    internalLinking: Boolean(req.body.internalLinking),
+    draftOnly: Boolean(req.body.draftOnly) || settings.draftOnlyMode,
+    brandVoice: settings.brandVoice,
+    targetAudience: settings.targetAudience
+  };
+
+  const placeholder = await createArticle(db, {
+    title: generation.topic || "Generating…",
+    handle: "generating",
+    author: settings.authorName,
+    primaryKeyword: generation.primaryKeyword || "",
+    excerpt: "",
+    metaTitle: "",
+    metaDescription: "",
+    bodyHtml: "",
+    tags: [],
+    featuredImageUrl: null,
+    featuredImageAlt: null,
+    secondaryKeywords: generation.secondaryKeywords || [],
+    topicFingerprint: "",
+    rationale: ""
+  }, { status: "generating", source: "ai", generationSettings: generation as never });
+
+  try {
+    const { products, warning } = await getProductLinks(config, settings.storefrontUrl);
+    const recentTopics = await recentTopicContext(db);
+    const model = settings.openaiModel || config.OPENAI_MODEL;
+    const generated = await generateArticle({
+      apiKey: config.OPENAI_API_KEY,
+      model,
+      settings,
+      products,
+      recentTopics,
+      generation
+    });
+    const updated = await updateArticle(db, placeholder.id, {
+      ...normalizeArticle(fromGenerated(generated, settings.authorName), { author: settings.authorName }).content,
+      status: "ready",
+      generationError: null,
+      lastError: warning || null
+    });
+    await recordAudit(db, {
+      actor: actor(req),
+      action: "article_generated",
+      articleId: placeholder.id,
+      detail: { warning, model }
+    });
+    res.redirect(`/articles/${updated!.id}?notice=${encodeURIComponent(warning ? `Generated with warning: ${warning}` : "Article generated.")}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateArticle(db, placeholder.id, {
+      status: "failed",
+      generationError: message,
+      lastError: message
+    });
+    await recordAudit(db, { actor: actor(req), action: "article_generation_failed", articleId: placeholder.id, detail: { error: message } });
+    res.redirect(`/articles/${placeholder.id}?error=${encodeURIComponent(message)}`);
+  }
+});
+
+app.get("/articles/:id", async (req: AuthedRequest, res) => {
+  const id = Number(req.params.id);
+  const [article, settings] = await Promise.all([getArticle(db, id), getSettings(db)]);
+  if (!article) return res.status(404).send(layout({ active: "/articles", config, content: `<section class="card"><p>Article not found.</p></section>` }));
+  res.send(layout({
+    active: "/articles",
+    config,
+    embedded: isEmbedded(req),
+    csrf: getCsrf(req),
+    notice: req.query.notice ? String(req.query.notice) : undefined,
+    error: req.query.error ? String(req.query.error) : undefined,
+    content: articleEditorPage({ article, settings, mode: "edit", csrf: getCsrf(req) })
+  }));
+});
+
+app.post("/articles/:id", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const settings = await getSettings(db);
+  const existing = await getArticle(db, id);
+  if (!existing) return res.status(404).send("Not found");
+  if (existing.status === "publishing") {
+    return res.redirect(`/articles/${id}?error=${encodeURIComponent("Article is publishing and cannot be edited right now.")}`);
+  }
+
+  const raw = bodyToContent(req.body, settings);
+  const normalized = normalizeArticle(raw, { author: settings.authorName });
+  const intent = String(req.body.intent || "save");
+  const requireReady = intent === "ready";
+  const validated = validateArticle(normalized.content, { settings, requireReady });
+  if (!validated.ok || !validated.content) {
+    return res.status(400).send(layout({
+      active: "/articles",
+      config,
+      error: "Please fix validation errors.",
+      content: articleEditorPage({
+        article: { ...existing, ...normalized.content },
+        settings,
+        mode: "edit",
+        fieldErrors: validated.errors,
+        csrf: getCsrf(req)
+      })
+    }));
+  }
+
+  const editedFields = ["title", "excerpt", "bodyHtml", "metaTitle", "metaDescription", "handle", "tags", "author", "featuredImageUrl", "featuredImageAlt"]
+    .filter(field => String((existing as never)[field] ?? "") !== String((validated.content as never)[field] ?? ""));
+
+  const scheduledFor = localToUtc(String(req.body.scheduledForLocal || ""), settings.timezone);
+  const status = existing.status === "published" ? "published" : requireReady ? "ready" : existing.status === "scheduled" ? "scheduled" : "draft";
+
+  await updateArticle(db, id, {
+    ...validated.content,
+    status,
+    scheduledFor: scheduledFor ?? existing.scheduledFor,
+    merchantEdited: true,
+    merchantEditedFields: [...new Set([...existing.merchantEditedFields, ...editedFields])]
+  });
+  await recordAudit(db, { actor: actor(req), action: "article_updated", articleId: id, detail: { editedFields } });
+  res.redirect(`/articles/${id}?notice=${encodeURIComponent("Saved.")}`);
+});
+
+app.get("/articles/:id/preview", async (req, res) => {
+  const article = await getArticle(db, Number(req.params.id));
+  if (!article) return res.status(404).send("Not found");
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>${esc(article.title)}</title>
+    <style>body{font:18px/1.6 Georgia,serif;max-width:720px;margin:40px auto;padding:0 16px;color:#222}
+    h1{font-size:2rem;line-height:1.2}.excerpt{color:#555;font-style:italic}img{max-width:100%}</style></head>
+    <body><h1>${esc(article.title)}</h1><p class="excerpt">${esc(article.excerpt)}</p>${article.bodyHtml}</body></html>`);
+});
+
+app.post("/articles/:id/regenerate", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const section = String(req.body.section || "full") as "full" | "title" | "excerpt" | "seo" | "body";
+  const settings = await getSettings(db);
+  const existing = await getArticle(db, id);
+  if (!existing) return res.status(404).send("Not found");
+
+  if (section === "full" && existing.merchantEdited && !req.body.confirm) {
+    // soft confirm already via browser confirm; proceed
+  }
+
+  try {
+    await updateArticle(db, id, { status: "generating" });
+    const { products } = await getProductLinks(config, settings.storefrontUrl);
+    const recentTopics = await recentTopicContext(db);
+    const generated = await generateArticle({
+      apiKey: config.OPENAI_API_KEY,
+      model: settings.openaiModel || config.OPENAI_MODEL,
+      settings,
+      products,
+      recentTopics,
+      section,
+      existing: toGenerated(existing),
+      generation: (existing.generationSettings || {}) as GenerationSettings
+    });
+
+    // Preserve merchant-edited fields on partial regen
+    const normalized = normalizeArticle(fromGenerated(generated, existing.author || settings.authorName), { author: settings.authorName }).content;
+    const protectedFields = new Set(existing.merchantEditedFields);
+    const merged = { ...normalized };
+    if (section !== "full") {
+      if (section === "title") {
+        merged.excerpt = existing.excerpt;
+        merged.metaDescription = existing.metaDescription;
+        merged.metaTitle = existing.metaTitle;
+        merged.bodyHtml = existing.bodyHtml;
+        merged.tags = existing.tags;
+      } else if (section === "excerpt") {
+        merged.title = existing.title;
+        merged.handle = existing.handle;
+        merged.metaDescription = existing.metaDescription;
+        merged.metaTitle = existing.metaTitle;
+        merged.bodyHtml = existing.bodyHtml;
+        merged.tags = existing.tags;
+      } else if (section === "seo") {
+        merged.bodyHtml = existing.bodyHtml;
+        merged.excerpt = existing.excerpt;
+        if (protectedFields.has("title")) merged.title = existing.title;
+        if (protectedFields.has("handle")) merged.handle = existing.handle;
+      } else if (section === "body") {
+        merged.title = existing.title;
+        merged.handle = existing.handle;
+        merged.excerpt = existing.excerpt;
+        merged.metaDescription = existing.metaDescription;
+        merged.metaTitle = existing.metaTitle;
+      }
+    }
+
+    await updateArticle(db, id, { ...merged, status: "ready", generationError: null, lastError: null });
+    await recordAudit(db, { actor: actor(req), action: "article_regenerated", articleId: id, detail: { section } });
+    res.redirect(`/articles/${id}?notice=${encodeURIComponent(`Regenerated ${section}.`)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateArticle(db, id, { status: "failed", generationError: message, lastError: message });
+    res.redirect(`/articles/${id}?error=${encodeURIComponent(message)}`);
+  }
+});
+
+app.post("/articles/:id/publish", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const settings = await getSettings(db);
+  const article = await getArticle(db, id);
+  if (!article) return res.status(404).send("Not found");
+  if (article.shopifyArticleId) {
+    return res.redirect(`/articles/${id}?notice=${encodeURIComponent("Already published.")}`);
+  }
+
+  const validated = validateArticle(article, { settings, requireReady: true });
+  if (!validated.ok) {
+    return res.redirect(`/articles/${id}?error=${encodeURIComponent(validated.errors.map(e => e.message).join("; "))}`);
+  }
+
+  try {
+    await updateArticle(db, id, { status: "publishing", idempotencyKey: `publish:${id}` });
+    const published = await publishArticle(config, toGenerated(validated.content!), article.author || settings.authorName, settings, {
+      imageUrl: article.featuredImageUrl,
+      imageAlt: article.featuredImageAlt,
+      isPublished: true,
+      idempotencyKey: `publish:${id}`
+    });
+    await updateArticle(db, id, {
+      status: "published",
+      shopifyArticleId: published.id,
+      shopifyUrl: published.url,
+      shopifyHandle: published.handle,
+      shopifyBlogId: published.blogId,
+      shopifyResponseStatus: published.responseStatus,
+      publishedAt: new Date(),
+      lastError: null
+    });
+    await recordAudit(db, { actor: actor(req), action: "article_published_manual", articleId: id, detail: { url: published.url } });
+    res.redirect(`/articles/${id}?notice=${encodeURIComponent("Published to Shopify.")}`);
+  } catch (error) {
+    const message = safeShopifyErrorMessage(error);
+    await updateArticle(db, id, { status: "failed", lastError: message });
+    await recordAudit(db, { actor: actor(req), action: "article_publish_failed", articleId: id, detail: { error: message } });
+    res.redirect(`/articles/${id}?error=${encodeURIComponent(message)}`);
+  }
+});
+
+app.post("/articles/:id/schedule", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const settings = await getSettings(db);
+  const article = await getArticle(db, id);
+  if (!article) return res.status(404).send("Not found");
+  const when = article.scheduledFor || localToUtc(String(req.body.scheduledForLocal || ""), settings.timezone);
+  if (!when) return res.redirect(`/articles/${id}?error=${encodeURIComponent("Set a publication time before scheduling.")}`);
+  const validated = validateArticle(article, { settings, requireReady: true });
+  if (!validated.ok) return res.redirect(`/articles/${id}?error=${encodeURIComponent(validated.errors.map(e => e.message).join("; "))}`);
+
+  const jobId = await scheduleArticleJob(db, id, when, `sched-${id}-${when.toISOString()}`);
+  await recordAudit(db, { actor: actor(req), action: "article_scheduled", articleId: id, jobId, detail: { when } });
+  res.redirect(`/articles/${id}?notice=${encodeURIComponent("Scheduled.")}`);
+});
+
+app.post("/articles/:id/cancel-schedule", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const updated = await cancelScheduledArticle(db, id);
+  if (!updated) return res.redirect(`/articles/${id}?error=${encodeURIComponent("Article is not scheduled or is already publishing.")}`);
+  await recordAudit(db, { actor: actor(req), action: "schedule_cancelled", articleId: id });
+  res.redirect(`/articles/${id}?notice=${encodeURIComponent("Schedule cancelled.")}`);
+});
+
+app.post("/articles/:id/duplicate", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const copy = await duplicateArticle(db, Number(req.params.id));
+  if (!copy) return res.status(404).send("Not found");
+  await recordAudit(db, { actor: actor(req), action: "article_duplicated", articleId: copy.id });
+  res.redirect(`/articles/${copy.id}?notice=${encodeURIComponent("Duplicated.")}`);
+});
+
+app.post("/articles/:id/archive", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  await cancelScheduledArticle(db, id).catch(() => null);
+  await updateArticle(db, id, { status: "archived", scheduledFor: null });
+  await recordAudit(db, { actor: actor(req), action: "article_archived", articleId: id });
+  res.redirect(`/articles?notice=${encodeURIComponent("Archived.")}`);
+});
+
+app.post("/articles/:id/retry", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  const article = await getArticle(db, id);
+  if (!article) return res.status(404).send("Not found");
+  await updateArticle(db, id, { status: "ready", lastError: null });
+  await insertManualJob(db, id);
+  void worker.tick();
+  await recordAudit(db, { actor: actor(req), action: "article_retry_queued", articleId: id });
+  res.redirect(`/articles/${id}?notice=${encodeURIComponent("Retry queued.")}`);
+});
+
+app.post("/articles/:id/image", upload.single("image"), async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const id = Number(req.params.id);
+  if (!req.file) return res.redirect(`/articles/${id}?error=${encodeURIComponent("No image uploaded.")}`);
+  // Store as data URL for draft preview; Shopify publish uses URL field. Production can swap to staged uploads.
+  const dataUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+  if (dataUrl.length > 1_500_000) {
+    return res.redirect(`/articles/${id}?error=${encodeURIComponent("Image too large after encoding. Use an image URL instead.")}`);
+  }
+  await updateArticle(db, id, {
+    featuredImageUrl: dataUrl,
+    featuredImageAlt: String(req.body.alt || ""),
+    merchantEdited: true
+  });
+  res.redirect(`/articles/${id}?notice=${encodeURIComponent("Image saved.")}`);
+});
+
+// ---- Schedule / History / Settings / Diagnostics ----
+app.get("/schedule", async (req: AuthedRequest, res) => {
+  const settings = await getSettings(db);
+  const { items } = await listArticles(db, { status: "scheduled", sort: "scheduled", pageSize: 50 });
+  const rows = items.map(a => `<tr><td>${esc(formatDate(a.scheduledFor, settings.timezone))}</td><td><a href="/articles/${a.id}">${esc(a.title)}</a></td><td>${esc(a.status)}</td></tr>`).join("");
+  res.send(layout({
+    active: "/schedule",
+    config,
+    embedded: isEmbedded(req),
+    content: `<section class="card"><h2>Schedule / Calendar</h2>
+      <p class="muted">Times shown in ${esc(settings.timezone)}. Stored in UTC.</p>
+      <div style="overflow:auto"><table style="width:100%;border-collapse:collapse">
+      <thead><tr><th>When</th><th>Article</th><th>Status</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="3" class="muted">No scheduled articles.</td></tr>`}</tbody></table></div></section>`
+  }));
+});
+
+app.get("/history", async (req: AuthedRequest, res) => {
+  const [jobs, audit, settings] = await Promise.all([listJobs(db, 50), listAudit(db, 50), getSettings(db)]);
+  const jobRows = jobs.map(j => `<tr><td>${esc(j.status)}</td><td>${esc(formatDate(j.scheduled_for, settings.timezone))}</td><td>${esc(j.attempts)}</td><td>${j.shopify_url ? `<a href="${esc(j.shopify_url)}" target="_blank" rel="noreferrer">View</a>` : esc((j.error || "").slice(0, 80))}</td></tr>`).join("");
+  const auditRows = audit.map(a => `<tr><td>${esc(formatDate(a.created_at, settings.timezone))}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}</td><td>${esc(a.article_id || "—")}</td></tr>`).join("");
+  res.send(layout({
+    active: "/history",
+    config,
+    embedded: isEmbedded(req),
+    content: `<div class="grid two">
+      <section class="card"><h2>Publishing jobs</h2><div style="overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr><th>Status</th><th>Scheduled</th><th>Attempts</th><th>Result</th></tr></thead><tbody>${jobRows || `<tr><td colspan="4" class="muted">No jobs.</td></tr>`}</tbody></table></div></section>
+      <section class="card"><h2>Audit trail</h2><div style="overflow:auto"><table style="width:100%;border-collapse:collapse"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Article</th></tr></thead><tbody>${auditRows || `<tr><td colspan="4" class="muted">No events.</td></tr>`}</tbody></table></div></section>
+    </div>`
+  }));
+});
+
+function formatDate(value: unknown, timezone: string) {
+  if (!value) return "—";
+  try { return new Date(String(value)).toLocaleString("en-US", { timeZone: timezone }); } catch { return String(value); }
+}
+
+app.get("/settings", async (req: AuthedRequest, res) => {
+  const settings = await getSettings(db);
+  let blogs: Array<{ id: string; title: string; handle: string }> = [];
+  try { blogs = await listBlogs(config); } catch { blogs = []; }
+  res.send(layout({
+    active: "/settings",
+    config,
+    embedded: isEmbedded(req),
+    csrf: getCsrf(req),
+    notice: req.query.saved ? "Settings saved." : undefined,
+    content: settingsPage({ settings, config, blogs, csrf: getCsrf(req) })
+  }));
+});
+
+app.post("/settings", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const current = await getSettings(db);
+  let blogs: Array<{ id: string; title: string; handle: string }> = [];
+  try { blogs = await listBlogs(config); } catch { /* ignore */ }
+
+  const parsed = z.object({
+    enabled: z.string().optional(),
+    draftOnlyMode: z.string().optional(),
+    enableAiImages: z.string().optional(),
+    cadence: z.enum(["daily", "twice_daily"]),
+    timezone: z.string().min(3).max(80),
+    firstTime: z.string().regex(/^\d{2}:\d{2}$/),
+    secondTime: z.string().regex(/^\d{2}:\d{2}$/),
+    authorName: z.string().min(2).max(100),
+    businessName: z.string().min(2).max(120),
+    storefrontUrl: z.string().url(),
+    shopifyBlogId: z.string().optional(),
+    shopifyBlogHandle: z.string().optional(),
+    brandVoice: z.string().max(2000),
+    targetAudience: z.string().max(2000),
+    defaultCta: z.string().max(2000),
+    facts: z.string(),
+    contentPillars: z.string(),
+    wordCountMin: z.coerce.number().int().min(300).max(2500),
+    wordCountMax: z.coerce.number().int().min(400).max(3000),
+    retryLimit: z.coerce.number().int().min(1).max(8),
+    openaiModel: z.string().max(100).optional()
+  }).safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).send(layout({
+      active: "/settings",
+      config,
+      error: parsed.error.issues.map(i => i.message).join("; "),
+      content: settingsPage({ settings: current, config, blogs, csrf: getCsrf(req) })
+    }));
+  }
+
+  const blog = blogs.find(b => b.id === parsed.data.shopifyBlogId);
+  const next = mergeSettings({
+    ...current,
+    enabled: Boolean(parsed.data.enabled),
+    draftOnlyMode: Boolean(parsed.data.draftOnlyMode),
+    enableAiImages: Boolean(parsed.data.enableAiImages),
+    cadence: parsed.data.cadence,
+    timezone: parsed.data.timezone,
+    firstTime: parsed.data.firstTime,
+    secondTime: parsed.data.secondTime,
+    authorName: parsed.data.authorName,
+    businessName: parsed.data.businessName,
+    storefrontUrl: parsed.data.storefrontUrl,
+    shopifyBlogId: parsed.data.shopifyBlogId || null,
+    shopifyBlogHandle: blog?.handle || parsed.data.shopifyBlogHandle || current.shopifyBlogHandle,
+    brandVoice: parsed.data.brandVoice,
+    targetAudience: parsed.data.targetAudience,
+    defaultCta: parsed.data.defaultCta,
+    facts: parsed.data.facts.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+    contentPillars: parsed.data.contentPillars.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+    wordCountMin: parsed.data.wordCountMin,
+    wordCountMax: parsed.data.wordCountMax,
+    retryLimit: parsed.data.retryLimit,
+    openaiModel: parsed.data.openaiModel || null
+  });
+
+  if (next.enabled) worker.emergencyPause(false);
+  await saveSettings(db, next);
+  await recordAudit(db, { actor: actor(req), action: "settings_updated", detail: { enabled: next.enabled, draftOnlyMode: next.draftOnlyMode } });
+  res.redirect("/settings?saved=1");
+});
+
+app.get("/diagnostics", async (req: AuthedRequest, res) => {
+  const settings = await getSettings(db);
+  const health = { ok: true, ready: true };
+  let shopify: unknown = { ok: false, message: "Not run yet. Use the button below." };
+  let openai: unknown = { ok: false, message: "Not run yet. Use the button below." };
+  if (req.query.shopify === "1") {
+    try { shopify = await verifyShopify(config, settings); }
+    catch (error) { shopify = { ok: false, error: safeShopifyErrorMessage(error), nextAction: "Check Shopify credentials and scopes." }; }
+  }
+  if (req.query.openai === "1") {
+    openai = await diagnoseOpenAI(config.OPENAI_API_KEY, settings.openaiModel || config.OPENAI_MODEL);
+  }
+  const scheduler = {
+    ...worker.getDiagnostics(),
+    autopilotEnabled: settings.enabled,
+    draftOnlyMode: settings.draftOnlyMode,
+    nextAction: settings.enabled
+      ? (settings.draftOnlyMode ? "Autopilot will generate drafts only until draft-only mode is disabled." : "Autopilot will publish on cadence.")
+      : "Autopilot is paused. Enable it in Settings when release checks pass."
+  };
+  res.send(layout({
+    active: "/diagnostics",
+    config,
+    embedded: isEmbedded(req),
+    csrf: getCsrf(req),
+    content: diagnosticsPage({ health, shopify, openai, scheduler, csrf: getCsrf(req) })
+  }));
+});
+
+app.post("/diagnostics/shopify", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  res.redirect("/diagnostics?shopify=1");
+});
+app.post("/diagnostics/openai", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  res.redirect("/diagnostics?openai=1");
+});
+app.post("/diagnostics/scheduler", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  res.redirect("/diagnostics");
+});
+
+// ---- JSON APIs ----
+app.get("/api/status", async (_req, res) => {
+  res.json(redactSecrets({
+    settings: await getSettings(db),
+    jobs: await listJobs(db, 20),
+    overview: await getOverviewStats(db),
+    scheduler: worker.getDiagnostics()
+  }));
+});
+
+app.get("/api/verify-shopify", async (_req, res) => {
+  try {
+    const settings = await getSettings(db);
+    res.json(await verifyShopify(config, settings));
+  } catch (error) {
+    res.status(502).json({ ok: false, error: safeShopifyErrorMessage(error) });
+  }
+});
+
+app.get("/api/diagnostics/openai", async (_req, res) => {
+  const settings = await getSettings(db);
+  res.json(await diagnoseOpenAI(config.OPENAI_API_KEY, settings.openaiModel || config.OPENAI_MODEL));
+});
+
+app.get("/api/products", async (req, res) => {
+  try {
+    const settings = await getSettings(db);
+    const q = String(req.query.q || "");
+    if (q) return res.json({ products: await searchProducts(config, q, settings.storefrontUrl) });
+    const result = await getProductLinks(config, settings.storefrontUrl);
+    res.json(result);
+  } catch (error) {
+    res.status(502).json({ products: [], warning: safeShopifyErrorMessage(error) });
+  }
+});
+
+app.post("/publish-now", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  await insertManualJob(db);
+  void worker.tick();
+  await recordAudit(db, { actor: actor(req), action: "publish_now_queued" });
+  res.redirect("/history?notice=" + encodeURIComponent("Publish-now job queued."));
+});
+
+// Error handler — never leak stacks/secrets
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(JSON.stringify(redactSecrets({ event: "request_error", error: err instanceof Error ? err.message : String(err) })));
+  if (res.headersSent) return;
+  res.status(500).send(layout({
+    active: "/",
+    config,
+    content: `<section class="card"><div class="notice error">Something went wrong. Try again or check Diagnostics.</div><a href="/">Back to overview</a></section>`
+  }));
+});
+
+const server = app.listen(config.PORT, () => {
+  console.log(JSON.stringify({ event: "listening", port: config.PORT }));
+});
+
+async function shutdown() {
+  worker.stop();
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  await db.end();
+}
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());

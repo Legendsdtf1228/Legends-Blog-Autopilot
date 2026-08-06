@@ -1,24 +1,46 @@
 # Legends Blog Autopilot
 
-A standalone, private service that autonomously chooses, writes, validates, and publishes Shopify blog posts for Legends DTF Prints.
+Production-ready Shopify blogging application for **Legends DTF Prints**. It generates, edits, validates, schedules, and publishes blog articles with Autopilot safety controls.
 
-## V1 behavior
+## Current architecture
 
-- Publishes once daily or twice daily in `America/New_York`.
-- Starts **paused** so deployment cannot accidentally publish.
-- Pulls active Shopify products for real internal links.
-- Gives the writer only approved Legends DTF facts and rejects unsupported links or risky claims.
-- Avoids the previous 90 topics using stable topic fingerprints.
-- Stores every scheduled slot, article, Shopify ID, error, and retry attempt in Postgres.
-- Retries temporary failures up to four times. A unique daily slot prevents double-publishing after restarts.
-- Provides an authenticated dashboard with Pause/Live, scheduling, fact editing, Publish Now, and history.
+| Layer | Responsibility |
+| --- | --- |
+| `src/server.ts` | Express app, dashboard routes, health, auth, APIs |
+| `src/auth.ts` | Standalone login/session cookies + Shopify session-token verification |
+| `src/content.ts` | Central normalize/validate pipeline (meta ≤160, HTML sanitize, limits) |
+| `src/writer.ts` | OpenAI structured generation, repair-once, diagnostics |
+| `src/shopify.ts` | Client-credentials token, blogs/products/publish, retries, diagnostics |
+| `src/scheduler.ts` | UTC scheduling, `FOR UPDATE SKIP LOCKED` claims, pause/draft-only safety |
+| `src/db.ts` | Postgres schema/migrations, articles, jobs, audit, settings |
+| `src/views.ts` + `public/assets` | Responsive merchant dashboard |
 
-## Required accounts and credentials
+**Autopilot defaults to paused + draft-only** so deploys cannot publish until release checks pass.
 
-1. A Railway project with a Postgres service.
-2. An OpenAI API key.
-3. A Shopify app Client ID and Client Secret, installed on your own store with `read_products`, `read_content`, and `write_content`.
-5. The public storefront URL (`https://legendsdtf.com`) for safe internal product links.
+## Required environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Postgres connection (only var required for migrations) |
+| `OPENAI_API_KEY` | OpenAI project key |
+| `OPENAI_MODEL` | Default model id |
+| `SHOPIFY_SHOP` | Permanent domain, e.g. `294ac0-57.myshopify.com` |
+| `SHOPIFY_CLIENT_ID` | App client id |
+| `SHOPIFY_CLIENT_SECRET` | App client secret (also used to verify session tokens) |
+| `ADMIN_PASSWORD` | Standalone admin password (min 12 chars) |
+| `APP_URL` | Public Railway URL |
+
+## Optional environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ADMIN_USERNAME` | `admin` | Standalone username |
+| `SESSION_SECRET` | derived | Cookie/CSRF signing secret |
+| `SHOPIFY_API_VERSION` | `2026-07` | Admin API version |
+| `STOREFRONT_URL` | `https://legendsdtf.com` | Public storefront for product links |
+| `PORT` | `3000` | HTTP port |
+| `NODE_ENV` | `development` | Runtime mode |
+| `TRUST_PROXY` | `true` | Trust Railway proxy for rate limits / secure cookies |
 
 ## Local setup
 
@@ -29,45 +51,66 @@ npm run db:migrate
 npm run dev
 ```
 
-Open `http://localhost:3000`. The browser uses HTTP Basic authentication: any username works and the password is `ADMIN_PASSWORD`.
-
-The service exchanges the Client ID and Secret for a 24-hour access token and refreshes it automatically. It also discovers the store's blog automatically, preferring the standard `news` blog. After deployment, visit `/api/verify-shopify` to verify the shop and selected blog.
-
-## Railway deployment
-
-1. Push this folder to a new GitHub repository.
-2. Create a Railway project from that repository and add Postgres.
-3. Add every variable from `.env.example`. Railway supplies `DATABASE_URL` when Postgres is linked.
-4. Set `APP_URL` to the Railway public URL.
-5. Deploy. `railway.json` runs the database migration before startup and checks `/health`.
-6. Sign in, confirm the fact sheet, use **Publish now** for the first controlled live article, inspect it in Shopify, then turn on automatic publishing.
-
-## Operational safety
-
-- Keep `OPENAI_API_KEY`, `SHOPIFY_CLIENT_SECRET`, and `ADMIN_PASSWORD` only in Railway variables.
-- Use a long random `ADMIN_PASSWORD`; the config requires at least 12 characters.
-- The service defaults to one daily post at 9:00 AM ET and remains paused until explicitly enabled.
-- To stop publication immediately, uncheck **Automatic publishing enabled**. Jobs already claimed as `running` may finish.
-- Failed jobs show an error in history and retry after 15, 30, 60, then 120 minutes.
+Open `http://localhost:3000/login` (username `admin`).
 
 ## Commands
 
 ```bash
 npm run typecheck
+npm run lint
 npm test
 npm run build
 npm start
+npm run db:migrate
 ```
 
-## Architecture
+Health:
 
-The web process also runs a lightweight worker. Once per minute it:
+- `GET /health` — process alive
+- `GET /ready` — database reachable
 
-1. Creates any due daily slot using the store timezone.
-2. Claims one job with a Postgres row lock.
-3. Retrieves active products from Shopify.
-4. Generates one schema-constrained article through the OpenAI Responses API.
-5. Validates word count, HTML, claims, links, and topic uniqueness.
-6. Publishes through Shopify's `articleCreate` mutation and records the result.
+## Shopify Dev Dashboard configuration
 
-This is intentionally a single-store V1, but settings and job boundaries can later be made shop-scoped without replacing the publishing pipeline.
+1. App URL: `https://<your-railway-domain>`
+2. Allowed redirection URLs:
+   - `https://<your-railway-domain>/`
+   - `https://<your-railway-domain>/login`
+   - `https://<your-railway-domain>/api/auth/session-token`
+3. Embedded app: **Enabled**
+4. Scopes: `read_products`, `read_content`, `write_content`
+5. Shop: `294ac0-57.myshopify.com` (Legends DTF Prints)
+6. Prefer blog handle `news` (selectable in Settings)
+
+Session tokens are verified server-side (JWT HS256 with client secret). The browser-supplied shop is never trusted alone.
+
+## Railway configuration
+
+1. Link Postgres (`DATABASE_URL` injected).
+2. Set all required env vars above.
+3. `railway.json` runs `node dist/src/migrate.js` pre-deploy, then `npm start`, healthcheck `/health`.
+4. Keep Autopilot paused until Diagnostics pass.
+
+## Deployment steps
+
+1. Merge/deploy this branch.
+2. Confirm pre-deploy migration succeeds.
+3. Hit `/health` and `/ready`.
+4. Sign in via `/login` (standalone) or open the app from Shopify Admin (embedded).
+5. Run Diagnostics → Shopify + OpenAI.
+6. Create a manual draft, generate an AI draft, edit SEO fields, save.
+7. Publish **one** controlled article manually.
+8. Only then disable draft-only and enable Autopilot.
+
+## Rollback steps
+
+1. Redeploy the previous Railway deployment/image.
+2. Do **not** run destructive DB resets. Migrations are forward-only and additive.
+3. Emergency stop: Settings → uncheck Automatic publishing, or Overview → Emergency pause.
+
+## Safety notes
+
+- Secrets stay in Railway env vars; Settings only shows configured/not configured.
+- Logs redact tokens/keys.
+- Scheduler never auto-publishes while paused.
+- Duplicate Shopify publishes are blocked via stored `shopify_article_id` / idempotency keys.
+- Oversized meta descriptions are auto-shortened before save/publish.

@@ -1,6 +1,6 @@
 {
   "name": "legends-blog-autopilot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,23 +8,36 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/**/*.test.ts",
     "db:migrate": "tsx src/migrate.ts"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "csrf-csrf": "^4.0.3",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.0.1",
+    "helmet": "^8.1.0",
+    "jose": "^6.0.12",
     "luxon": "^3.7.1",
+    "multer": "^2.0.2",
     "openai": "^5.12.2",
     "pg": "^8.16.3",
+    "sanitize-html": "^2.17.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/cookie-parser": "^1.4.9",
     "@types/express": "^5.0.3",
     "@types/luxon": "^3.6.2",
+    "@types/multer": "^2.0.0",
     "@types/node": "^24.2.0",
     "@types/pg": "^8.15.5",
+    "@types/sanitize-html": "^2.16.0",
     "tsx": "^4.20.3",
     "typescript": "^5.9.2"
   }
