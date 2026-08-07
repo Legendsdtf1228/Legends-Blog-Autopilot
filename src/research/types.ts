@@ -70,6 +70,18 @@ export interface PillarBalance {
   legends_story: number;
 }
 
+export interface AutoPublishThresholds {
+  overallOpportunityScore: number;
+  businessRelevance: number;
+  topicSpecificity: number;
+  factualConfidence: number;
+  uniqueness: number;
+  conversionRelevance: number;
+  sourceQuality: number;
+  articleQuality: number;
+  internalLinkConfidence: number;
+}
+
 export interface ResearchSettings {
   enabled: boolean;
   region: string;
@@ -78,6 +90,8 @@ export interface ResearchSettings {
   pillarBalance: PillarBalance;
   overlapRejectThreshold: number;
   requireInterviewForFirstPerson: boolean;
+  autoThresholds: AutoPublishThresholds;
+  minTopicSpecificity: number;
 }
 
 export interface ResearchSignal {
@@ -156,6 +170,15 @@ export interface FeaturedProduct {
   retrievedAt?: string;
 }
 
+export type TopicDecision =
+  | "AUTO_ELIGIBLE"
+  | "DRAFT_ONLY"
+  | "NEEDS_MERCHANT_INPUT"
+  | "REJECTED"
+  | "SKIPPED_NO_QUALIFIED_TOPIC";
+
+export type DemandEvidenceClass = "verified_demand" | "inferred_opportunity" | "editorial_business_opportunity";
+
 export interface ResearchOpportunity {
   id: string;
   cluster: KeywordCluster;
@@ -169,18 +192,37 @@ export interface ResearchOpportunity {
   requiresInterview: boolean;
   productsToFeature: FeaturedProduct[];
   proposedTitle: string;
+  proposedH1: string;
   proposedHandle: string;
   proposedOutline: string[];
+  readerQuestion: string;
+  topicSpecificity: number;
+  uniqueness: number;
+  demandClass: DemandEvidenceClass;
+  decision: TopicDecision;
+  decisionReasons: string[];
+  failedGates: string[];
   internalLinks: string[];
-  externalSources: Array<{ url: string; retrievedAt: string; note: string }>;
+  externalSources: Array<{ url: string; retrievedAt: string; note: string; title?: string; publisher?: string }>;
   status: "suggested" | "reserved" | "approved" | "rejected" | "used";
   reservedBy?: string | null;
   reservedUntil?: string | null;
 }
 
+export interface ExternalFactRecord {
+  claim: string;
+  sourceTitle: string;
+  sourceUrl: string;
+  publisher: string;
+  retrievedAt: string;
+  freshness: TopicFreshnessClass;
+}
+
 export interface LockedFactSheet {
+  legendsFacts: string[];
   productFacts: string[];
   businessFacts: string[];
+  externalFacts: ExternalFactRecord[];
   sourcedIndustryFacts: Array<{ claim: string; url: string; retrievedAt: string }>;
   prohibitedClaims: string[];
   reviewFlags: string[];
@@ -205,8 +247,10 @@ export interface ArticleBrief {
   secondaryKeywords: string[];
   searchIntent: SearchIntent;
   targetAudienceLabel: string;
+  readerQuestion: string;
   geographicTarget: string;
   demandEvidence: string;
+  demandClass: DemandEvidenceClass;
   dataCollectedLabel: string;
   estimatedCompetition: string;
   conversionRelevance: string;
@@ -214,17 +258,26 @@ export interface ArticleBrief {
   overlapScore: number;
   whyDistinct: string;
   proposedTitle: string;
+  proposedH1: string;
   proposedHandle: string;
   proposedOutline: string[];
   productsToFeature: FeaturedProduct[];
   internalLinks: string[];
-  externalSources: Array<{ url: string; retrievedAt: string; note: string }>;
+  externalSources: Array<{ url: string; retrievedAt: string; note: string; title?: string; publisher?: string }>;
   freshnessClass: TopicFreshnessClass;
   requiresInterview: boolean;
   factSheet: LockedFactSheet;
+  decision: TopicDecision;
+  decisionReasons: string[];
+  failedGates: string[];
+  automaticPublishingEligible: boolean;
+  conversionPath: string;
   status: "pending_review" | "approved" | "rejected" | "generated";
   customTopic?: string | null;
   scores: OpportunityScores;
+  topicSpecificity: number;
+  uniqueness: number;
+  seoDeliverables?: import("./seo.js").SeoDeliverables;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -232,8 +285,11 @@ export interface ArticleBrief {
 export interface EvidenceReport {
   sourcesUsed: Array<{ provider: string; detail: string; collectedAt: string }>;
   shopifyFactsUsed: string[];
+  legendsFactsUsed: string[];
   reviewFlags: string[];
-  qualityGateResults: Array<{ gate: string; ok: boolean; detail: string }>;
+  qualityGateResults: Array<{ gate: string; ok: boolean; detail: string; severity?: string }>;
+  editorialFindings?: Array<{ gate: string; severity: string; detail: string }>;
+  decision?: TopicDecision;
   generatedAt: string;
 }
 
@@ -243,4 +299,6 @@ export interface ResearchCycleResult {
   signals: ResearchSignal[];
   opportunities: ResearchOpportunity[];
   selected: ResearchOpportunity | null;
+  cycleDecision: TopicDecision;
+  cycleDecisionReasons: string[];
 }

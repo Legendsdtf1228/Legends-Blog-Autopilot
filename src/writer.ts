@@ -127,8 +127,10 @@ Approved research brief controls this draft:
 - Search intent: ${brief.searchIntent}
 - Audience: ${brief.targetAudienceLabel}
 - Outline to cover: ${brief.proposedOutline.join(" | ")}
-- Locked product facts (do not contradict; do not invent beyond these): ${brief.factSheet.productFacts.join(" || ") || "none"}
+- Locked Legends facts (do not contradict; do not invent beyond these): ${(brief.factSheet.legendsFacts || brief.factSheet.businessFacts).join(" || ") || "none"}
+- Locked product facts: ${brief.factSheet.productFacts.join(" || ") || "none"}
 - Locked business facts: ${brief.factSheet.businessFacts.join(" || ")}
+- External facts (cite; do not invent): ${(brief.factSheet.externalFacts || []).map(f => `${f.claim} (${f.sourceUrl})`).join(" || ") || "none"}
 - Prohibited: ${brief.factSheet.prohibitedClaims.join(" || ")}
 - Review flags: ${brief.factSheet.reviewFlags.join(" || ") || "none"}
 - Color psychology: never present cultural associations as universal scientific facts or guaranteed sales lifts.

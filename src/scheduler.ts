@@ -11,6 +11,7 @@ import {
   insertSlot,
   recentTopicContext,
   recordAudit,
+  saveSettings,
   updateArticle,
   createArticleFromGenerated
 } from "./db.js";
@@ -18,6 +19,14 @@ import { generateArticle } from "./writer.js";
 import { getProductLinks, publishArticle, ShopifyError } from "./shopify.js";
 import type { GeneratedArticle, Settings } from "./types.js";
 import { toGenerated } from "./content.js";
+import { authorizeAutomaticPublication } from "./autopilot/authorizePublish.js";
+import {
+  canAutoPublish,
+  canRunResearch,
+  killSwitchFromCondition,
+  recordsShadowDecision
+} from "./autopilot/rollout.js";
+import { canPublishUnderFrequencyLimits, executeScheduledResearchCycle } from "./autopilot/researchCycle.js";
 
 export function dueSlots(now: DateTime, settings: Settings): Array<{ key: string; date: Date }> {
   if (!settings.enabled) return [];
@@ -31,12 +40,28 @@ export function dueSlots(now: DateTime, settings: Settings): Array<{ key: string
   });
 }
 
+/** Research windows use researchCadence and are independent of publish `enabled`. */
+export function dueResearchSlots(now: DateTime, settings: Settings): Array<{ key: string; date: Date }> {
+  if (!canRunResearch(settings.rolloutMode) || settings.killSwitch.paused || !settings.research.enabled) return [];
+  const local = now.setZone(settings.timezone);
+  const cadence = settings.researchCadence || "twice_daily";
+  const times = cadence === "twice_daily" ? [settings.firstTime, settings.secondTime] : [settings.firstTime];
+  return times.flatMap((time, index) => {
+    const [hour, minute] = time.split(":").map(Number);
+    const slot = local.set({ hour, minute, second: 0, millisecond: 0 });
+    if (!slot.isValid || slot > local) return [];
+    return [{ key: `research:${slot.toISODate()}:${index + 1}`, date: slot.toUTC().toJSDate() }];
+  });
+}
+
 export class AutopilotWorker {
   private timer?: NodeJS.Timeout;
   private busy = false;
   private lastTickAt: Date | null = null;
   private lastError: string | null = null;
   private pausedEmergency = false;
+  private consecutiveFailures = 0;
+  private publishedThisTick = 0;
 
   constructor(private db: Db, private config: AppConfig) {}
 
@@ -60,23 +85,67 @@ export class AutopilotWorker {
       busy: this.busy,
       emergencyPaused: this.pausedEmergency,
       lastTickAt: this.lastTickAt,
-      lastError: this.lastError
+      lastError: this.lastError,
+      consecutiveFailures: this.consecutiveFailures
     };
+  }
+
+  private async tripKillSwitch(kind: string, detail: Record<string, unknown>): Promise<void> {
+    const settings = await getSettings(this.db);
+    const kill = killSwitchFromCondition(kind);
+    settings.killSwitch = {
+      ...settings.killSwitch,
+      ...kill,
+      consecutiveFailureThreshold: settings.killSwitch.consecutiveFailureThreshold
+    };
+    settings.enabled = false;
+    await saveSettings(this.db, settings);
+    this.pausedEmergency = true;
+    await recordAudit(this.db, {
+      actor: "scheduler",
+      action: "kill_switch_triggered",
+      detail: { kind, ...detail, recoveryStep: kill.recoveryStep }
+    });
   }
 
   async tick(): Promise<void> {
     if (this.busy) return;
     this.busy = true;
     this.lastTickAt = new Date();
+    this.publishedThisTick = 0;
     try {
       const settings = await getSettings(this.db);
-      if (this.pausedEmergency || !settings.enabled) {
-        // Still allow processing of explicitly queued manual article jobs only when enabled?
-        // Spec: Never publish automatically while Autopilot is paused.
-        // Manual publish-now should still work — those jobs exist with slot_key manual:* or article:*
-        await this.processClaimed(settings, { autopilotPaused: !settings.enabled || this.pausedEmergency });
+
+      // Research cycles (twice-daily by default) — never publishes by themselves
+      for (const slot of dueResearchSlots(DateTime.utc(), settings)) {
+        try {
+          await executeScheduledResearchCycle({
+            db: this.db,
+            config: this.config,
+            slotKey: slot.key,
+            actor: "scheduler"
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(JSON.stringify(redactSecrets({ event: "research_cycle_failed", error: message, slot: slot.key })));
+        }
+      }
+
+      const publishPaused =
+        this.pausedEmergency ||
+        !settings.enabled ||
+        settings.killSwitch.paused ||
+        settings.rolloutMode === "paused" ||
+        settings.rolloutMode === "observe" ||
+        settings.draftOnlyMode ||
+        !canAutoPublish(settings.rolloutMode);
+
+      if (publishPaused) {
+        const hardPause = this.pausedEmergency || settings.killSwitch.paused || settings.rolloutMode === "paused";
+        await this.processClaimed(settings, { autopilotPaused: hardPause || !settings.enabled });
         return;
       }
+
       for (const slot of dueSlots(DateTime.utc(), settings)) {
         await insertSlot(this.db, slot.key, slot.date);
       }
@@ -104,6 +173,8 @@ export class AutopilotWorker {
 
     let article: GeneratedArticle | null = null;
     let articleId = job.article_id ? Number(job.article_id) : null;
+    const isManualJob =
+      String(job.slot_key).startsWith("manual:") || String(job.slot_key).startsWith("article:");
 
     try {
       // Existing article path (edit/schedule/publish-now)
@@ -111,18 +182,58 @@ export class AutopilotWorker {
         const existing = await getArticle(this.db, articleId);
         if (!existing) throw new Error(`Article ${articleId} not found for job ${job.id}`);
         if (existing.status === "archived") throw new Error("Article is archived");
+        article = toGenerated(existing);
+
+        // Already linked: update via articleUpdate (never create again).
         if (existing.shopifyArticleId) {
-          // Idempotent: already published
-          await finishJob(this.db, job.id, toGenerated(existing), existing.shopifyArticleId, existing.shopifyUrl, {
-            articleId,
-            blogId: existing.shopifyBlogId || undefined,
-            handle: existing.shopifyHandle || existing.handle,
-            responseStatus: "already_published"
+          if (!isManualJob) {
+            const auth = await authorizeAutomaticPublication({
+              db: this.db,
+              settings,
+              articleId,
+              shadowEvaluation: recordsShadowDecision(settings.rolloutMode)
+            });
+            if (!auth.ok) {
+              await recordAudit(this.db, {
+                actor: "scheduler",
+                action: recordsShadowDecision(settings.rolloutMode) ? "shadow_auto_decision" : "auto_publish_blocked",
+                articleId,
+                jobId: job.id,
+                detail: {
+                  wouldPublish: auth.wouldPublish,
+                  reasons: auth.reasons,
+                  mode: settings.rolloutMode,
+                  shopifyArticleId: existing.shopifyArticleId
+                }
+              });
+              await this.db.query(
+                `UPDATE publish_jobs SET status='skipped', article=$2::jsonb, completed_at=now(), updated_at=now(), error=$3 WHERE id=$1`,
+                [job.id, JSON.stringify(article), auth.reasons.join(" ")]
+              );
+              return;
+            }
+          }
+
+          const published = await publishArticle(this.config, article, settings.authorName, settings, {
+            imageUrl: existing.featuredImageUrl,
+            imageAlt: existing.featuredImageAlt,
+            isPublished: true,
+            idempotencyKey: `job:${job.id}`,
+            existingShopifyArticleId: existing.shopifyArticleId
           });
+          await finishJob(this.db, job.id, article, published.id, published.url, {
+            articleId,
+            blogId: published.blogId ?? undefined,
+            handle: published.handle,
+            responseStatus: published.responseStatus
+          });
+          this.consecutiveFailures = 0;
+          this.publishedThisTick += 1;
           return;
         }
-        article = toGenerated(existing);
       } else {
+        // Legacy non-research publish-slot generator: never auto-publish.
+        // Twice-daily Autopilot articles must come from executeScheduledResearchCycle.
         const { products, warning } = await getProductLinks(this.config, settings.storefrontUrl);
         if (warning) console.warn(JSON.stringify({ event: "product_access_warning", warning }));
         const recentTopics = await recentTopicContext(this.db);
@@ -138,53 +249,123 @@ export class AutopilotWorker {
         if (duplicate) throw new Error(`Duplicate topic fingerprint: ${article.topicFingerprint}`);
 
         const created = await createArticleFromGenerated(this.db, article, {
-          status: settings.draftOnlyMode ? "ready" : "publishing",
+          status: "ready",
           source: "autopilot",
-          author: settings.authorName
+          author: settings.authorName,
+          generationSettings: { researchPipeline: false, legacyPublishSlot: true }
         });
         articleId = created.id;
         await this.db.query("UPDATE publish_jobs SET article_id=$2, updated_at=now() WHERE id=$1", [job.id, articleId]);
+        await this.db.query(
+          `UPDATE publish_jobs SET status='skipped', article=$2::jsonb, completed_at=now(), updated_at=now(), error=$3 WHERE id=$1`,
+          [job.id, JSON.stringify(article), "Legacy publish-slot generator cannot auto-publish; use research pipeline."]
+        );
+        await recordAudit(this.db, {
+          actor: "scheduler",
+          action: "article_generated_draft_only",
+          articleId,
+          jobId: job.id,
+          detail: {
+            title: article.title,
+            mode: settings.rolloutMode,
+            reason: "Legacy slot generator is draft-only; gated research cycle owns Autopilot articles."
+          }
+        });
+        return;
+      }
 
-        if (settings.draftOnlyMode) {
-          await updateArticle(this.db, articleId, { status: "ready" });
-          await this.db.query(
-            `UPDATE publish_jobs SET status='skipped', article=$2::jsonb, completed_at=now(), updated_at=now(), error=$3 WHERE id=$1`,
-            [job.id, JSON.stringify(article), "Draft-only mode: article generated and saved as ready without publishing."]
-          );
+      if (!article || !articleId) throw new Error("No article payload for publish job");
+
+      if (this.publishedThisTick >= settings.frequencyLimits.maxArticlesPerCycle) {
+        await this.db.query(
+          `UPDATE publish_jobs SET status='pending', attempts=GREATEST(attempts-1,0), next_attempt_at=now() + interval '1 hour', updated_at=now(), error=$2 WHERE id=$1`,
+          [job.id, "maxArticlesPerCycle reached for this tick"]
+        );
+        return;
+      }
+
+      // Fail-closed authorization at the publication boundary (automatic jobs only).
+      if (!isManualJob) {
+        const auth = await authorizeAutomaticPublication({
+          db: this.db,
+          settings,
+          articleId
+        });
+        if (!auth.ok) {
           await recordAudit(this.db, {
             actor: "scheduler",
-            action: "article_generated_draft_only",
+            action: "auto_publish_blocked",
             articleId,
             jobId: job.id,
-            detail: { title: article.title }
+            detail: { reasons: auth.reasons, mode: settings.rolloutMode }
           });
+          await this.db.query(
+            `UPDATE publish_jobs SET status='skipped', completed_at=now(), updated_at=now(), error=$2 WHERE id=$1`,
+            [job.id, auth.reasons.join(" ")]
+          );
+          return;
+        }
+      } else {
+        const frequency = await canPublishUnderFrequencyLimits(this.db, settings);
+        if (!frequency.ok && canAutoPublish(settings.rolloutMode)) {
+          await this.db.query(
+            `UPDATE publish_jobs SET status='skipped', completed_at=now(), updated_at=now(), error=$2 WHERE id=$1`,
+            [job.id, frequency.reason || "Frequency limit"]
+          );
           return;
         }
       }
 
+      const existingLocal = await getArticle(this.db, articleId);
       const published = await publishArticle(this.config, article, settings.authorName, settings, {
-        imageUrl: articleId ? (await getArticle(this.db, articleId))?.featuredImageUrl : null,
-        imageAlt: articleId ? (await getArticle(this.db, articleId))?.featuredImageAlt : null,
+        imageUrl: existingLocal?.featuredImageUrl ?? null,
+        imageAlt: existingLocal?.featuredImageAlt ?? null,
         isPublished: true,
-        idempotencyKey: `job:${job.id}`
+        idempotencyKey: `job:${job.id}`,
+        existingShopifyArticleId: existingLocal?.shopifyArticleId
       });
 
-      await finishJob(this.db, job.id, article, published.id, published.url, {
-        articleId: articleId ?? undefined,
-        blogId: published.blogId ?? undefined,
-        handle: published.handle,
-        responseStatus: published.responseStatus
-      });
+      try {
+        await finishJob(this.db, job.id, article, published.id, published.url, {
+          articleId: articleId ?? undefined,
+          blogId: published.blogId ?? undefined,
+          handle: published.handle,
+          responseStatus: published.responseStatus
+        });
+      } catch (persistError) {
+        // Shopify succeeded but local persistence failed — do not create again on retry.
+        if (articleId && published.id) {
+          await updateArticle(this.db, articleId, {
+            shopifyArticleId: published.id,
+            shopifyUrl: published.url,
+            shopifyHandle: published.handle,
+            shopifyBlogId: published.blogId,
+            shopifyResponseStatus: "created_pending_local",
+            status: "published",
+            publishedAt: new Date()
+          }).catch(() => undefined);
+        }
+        await this.tripKillSwitch("ambiguous_shopify_persistence", {
+          jobId: job.id,
+          shopifyId: published.id,
+          persistError: persistError instanceof Error ? persistError.message : String(persistError)
+        });
+        throw persistError;
+      }
+
+      this.consecutiveFailures = 0;
+      this.publishedThisTick += 1;
       await recordAudit(this.db, {
         actor: "scheduler",
         action: "article_published",
         articleId: articleId ?? undefined,
         jobId: job.id,
-        detail: { shopifyId: published.id, url: published.url }
+        detail: { shopifyId: published.id, url: published.url, responseStatus: published.responseStatus }
       });
       console.log(JSON.stringify({ event: "article_published", jobId: job.id, title: article.title, shopifyId: published.id }));
     } catch (error) {
       const retryable = error instanceof ShopifyError ? error.retryable : true;
+      const message = error instanceof Error ? error.message : String(error);
       await failJob(this.db, job.id, article, error);
       if (!retryable) {
         await this.db.query(
@@ -192,17 +373,31 @@ export class AutopilotWorker {
           [job.id]
         );
       }
+
+      if (/duplicate|already exists|taken/i.test(message) && /shopify|article/i.test(message)) {
+        await this.tripKillSwitch("duplicate_shopify_create", { jobId: job.id, error: message });
+      }
+
+      this.consecutiveFailures += 1;
+      if (this.consecutiveFailures >= (settings.killSwitch.consecutiveFailureThreshold || 3)) {
+        await this.tripKillSwitch("consecutive_failures", {
+          jobId: job.id,
+          consecutiveFailures: this.consecutiveFailures,
+          error: message
+        });
+      }
+
       await recordAudit(this.db, {
         actor: "scheduler",
         action: "article_failed",
         articleId: articleId ?? undefined,
         jobId: job.id,
-        detail: { error: error instanceof Error ? error.message : String(error), retryable }
+        detail: { error: message, retryable }
       });
       console.error(JSON.stringify(redactSecrets({
         event: "article_failed",
         jobId: job.id,
-        error: error instanceof Error ? error.message : String(error)
+        error: message
       })));
     }
   }

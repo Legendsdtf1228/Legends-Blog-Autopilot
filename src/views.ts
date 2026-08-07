@@ -138,15 +138,28 @@ export function overviewPage(args: {
   shopName?: string;
   blogName?: string;
   csrf?: string;
+  latestCycle?: { decision: string; collectedAt: string; reasons: string[] } | null;
+  publishedLast7Days?: number;
 }) {
   const { settings, stats } = args;
+  const kill = settings.killSwitch.paused
+    ? `<div class="notice error"><strong>Kill switch active:</strong> ${esc(settings.killSwitch.reason || "paused")}<br><span class="muted">${esc(settings.killSwitch.recoveryStep || "")}</span></div>`
+    : "";
+  const promo = settings.promotionProgress;
+  const promoNeed = settings.promotionThresholds;
   return `
+  ${kill}
   <div class="grid stats">
-    <section class="card"><div class="muted">Autopilot</div><div class="metric">${settings.enabled ? "Running" : "Paused"}</div><div class="muted">${settings.draftOnlyMode ? "Draft-only mode on" : "Live publish mode"}</div></section>
+    <section class="card"><div class="muted">Rollout mode</div><div class="metric" style="font-size:1.2rem">${esc(settings.rolloutMode)}</div><div class="muted">${settings.enabled ? "Publish scheduler armed" : "Publish scheduler paused"} · ${settings.draftOnlyMode ? "draft-only" : "live"}</div></section>
     <section class="card"><div class="muted">Shopify</div><div class="metric" style="font-size:1.4rem">${esc(args.shopName || settings.businessName)}</div><div class="muted">Blog: ${esc(args.blogName || settings.shopifyBlogHandle)} · ${args.shopifyOk === false ? "Check diagnostics" : "Connected"}</div></section>
-    <section class="card"><div class="muted">OpenAI</div><div class="metric" style="font-size:1.4rem">${esc(settings.openaiModel || "ENV model")}</div><div class="muted">${args.openaiOk === false ? "Check diagnostics" : "Configured"}</div></section>
-    <section class="card"><div class="muted">Next scheduled</div><div class="metric" style="font-size:1.1rem">${stats.nextScheduled ? esc(stats.nextScheduled.title) : "None"}</div><div class="muted">${stats.nextScheduled ? formatWhen(stats.nextScheduled.scheduledFor, settings.timezone) : "—"}</div></section>
+    <section class="card"><div class="muted">Latest research cycle</div><div class="metric" style="font-size:1.1rem">${esc(args.latestCycle?.decision || "No cycle yet")}</div><div class="muted">${args.latestCycle ? esc(args.latestCycle.reasons[0] || args.latestCycle.collectedAt) : `Cadence ${settings.researchCadence} · windows ${settings.firstTime}/${settings.secondTime}`}</div></section>
+    <section class="card"><div class="muted">Published (7d)</div><div class="metric">${args.publishedLast7Days ?? 0}</div><div class="muted">Cap ${settings.frequencyLimits.maxPublishedPerRolling7Days} · min spacing ${settings.frequencyLimits.minHoursBetweenPublishes}h · max/cycle ${settings.frequencyLimits.maxArticlesPerCycle}</div></section>
   </div>
+  <section class="card">
+    <h3>Quality thresholds & promotion</h3>
+    <p class="muted">Opportunity ≥ ${settings.research.autoThresholds.overallOpportunityScore}, specificity ≥ ${settings.research.autoThresholds.topicSpecificity}, uniqueness ≥ ${settings.research.autoThresholds.uniqueness}, factual ≥ ${settings.research.autoThresholds.factualConfidence}, quality ≥ ${settings.research.autoThresholds.articleQuality}. Research may run twice daily without publishing.</p>
+    <p class="muted">Promotion progress: ${promo.consecutiveReviewedDrafts}/${promoNeed.minConsecutiveReviewedDrafts} reviewed drafts · ${Math.round(promo.merchantApprovalRate * 100)}% / ${Math.round(promoNeed.minMerchantApprovalRate * 100)}% approval · ${promo.shadowAutoDays}/${promoNeed.minShadowAutoDays} SHADOW_AUTO days · explicit activation ${promo.autoPublishExplicitlyActivated ? "yes" : "no"}.</p>
+  </section>
   <div class="grid three">
     <section class="card"><div class="muted">Drafts / ready</div><div class="metric">${stats.draftCount}</div></section>
     <section class="card"><div class="muted">Scheduled</div><div class="metric">${stats.scheduledCount}</div></section>
@@ -434,9 +447,33 @@ export function settingsPage(args: {
       <label class="toggle"><input type="checkbox" name="enableAiImages" ${checked(s.enableAiImages)}> Enable optional AI image generation</label>
       <h3>Topic research</h3>
       <label class="toggle"><input type="checkbox" name="researchEnabled" ${checked(s.research.enabled)}> Enable research cycles</label>
+      <label>Rollout mode
+        <select name="rolloutMode">
+          <option value="paused" ${selected(s.rolloutMode, "paused")}>PAUSED</option>
+          <option value="observe" ${selected(s.rolloutMode, "observe")}>OBSERVE</option>
+          <option value="draft_only" ${selected(s.rolloutMode, "draft_only")}>DRAFT_ONLY</option>
+          <option value="shadow_auto" ${selected(s.rolloutMode, "shadow_auto")}>SHADOW_AUTO</option>
+          <option value="auto_publish" ${selected(s.rolloutMode, "auto_publish")}>AUTO_PUBLISH (explicit only)</option>
+        </select>
+      </label>
+      <label>Research cadence
+        <select name="researchCadence">
+          <option value="daily" ${selected(s.researchCadence, "daily")}>Once daily</option>
+          <option value="twice_daily" ${selected(s.researchCadence, "twice_daily")}>Twice daily</option>
+        </select>
+      </label>
       <label>Research region<input name="researchRegion" value="${esc(s.research.region)}"></label>
       <label>Freshness max days<input name="researchFreshnessMaxDays" type="number" min="1" max="365" value="${esc(s.research.freshnessMaxDays)}"></label>
+      <h3>Publish frequency limits</h3>
+      <div class="row">
+        <label>Max published / 7 days<input type="number" name="maxPublishedPerRolling7Days" min="0" max="50" value="${s.frequencyLimits.maxPublishedPerRolling7Days}"></label>
+        <label>Min hours between publishes<input type="number" name="minHoursBetweenPublishes" min="0" max="168" value="${s.frequencyLimits.minHoursBetweenPublishes}"></label>
+        <label>Max articles / cycle<input type="number" name="maxArticlesPerCycle" min="1" max="5" value="${s.frequencyLimits.maxArticlesPerCycle}"></label>
+      </div>
       <label class="toggle"><input type="checkbox" name="researchRequireInterview" ${checked(s.research.requireInterviewForFirstPerson)}> Require merchant interview for first-person stories</label>
+      <label class="toggle"><input type="checkbox" name="activateAutoPublish" ${checked(false)}> Explicitly activate AUTO_PUBLISH (only after promotion gates)</label>
+      <p class="muted">Promotion requires ${s.promotionThresholds.minConsecutiveReviewedDrafts} reviewed drafts, ${Math.round(s.promotionThresholds.minMerchantApprovalRate * 100)}% approval, and ${s.promotionThresholds.minShadowAutoDays} SHADOW_AUTO days. Current: ${s.promotionProgress.consecutiveReviewedDrafts} drafts · ${Math.round(s.promotionProgress.merchantApprovalRate * 100)}% · ${s.promotionProgress.shadowAutoDays} days.</p>
+      <label class="toggle"><input type="checkbox" name="clearKillSwitch" ${checked(false)}> Clear kill switch (after remediation)</label>
       <h3>Secrets (Railway only)</h3>
       <ul class="list muted">
         <li>OPENAI_API_KEY: ${secret(Boolean(args.config.OPENAI_API_KEY))}</li>
@@ -496,9 +533,10 @@ export function researchPage(args: {
       <td>${esc(AUDIENCE_LABELS[o.cluster.audience])}</td>
       <td>${esc(FORMAT_LABELS[o.cluster.format])}</td>
       <td>${esc(o.scores.opportunityScore.toFixed(3))}</td>
+      <td>${esc(o.decision || "—")}</td>
       <td>${esc(o.status)}</td>
       <td>${esc(o.dataCollectedLabel)}</td>
-    </tr>`).join("") || `<tr><td colspan="8" class="muted">No opportunities yet. Run a research cycle.</td></tr>`;
+    </tr>`).join("") || `<tr><td colspan="9" class="muted">No opportunities yet. Run a research cycle.</td></tr>`;
 
   return `
   <section class="card">
@@ -524,7 +562,7 @@ export function researchPage(args: {
     <h3>Ranked opportunities</h3>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Topic</th><th>Pillar</th><th>Keyword</th><th>Audience</th><th>Format</th><th>Score</th><th>Status</th><th>Data freshness</th></tr></thead>
+        <thead><tr><th>Topic</th><th>Pillar</th><th>Keyword</th><th>Audience</th><th>Format</th><th>Score</th><th>Decision</th><th>Status</th><th>Data freshness</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -594,11 +632,19 @@ export function briefReviewPage(args: {
     <dl class="detail-list">
       <dt>Content pillar</dt><dd>${esc(b.pillar)}</dd>
       <dt>Target audience</dt><dd>${esc(b.targetAudienceLabel)}</dd>
+      <dt>Subcategory</dt><dd>${esc(b.subcategory)}</dd>
       <dt>Primary keyword</dt><dd>${esc(b.primaryKeyword)}</dd>
       <dt>Secondary cluster</dt><dd>${esc(b.secondaryKeywords.join(", ") || "—")}</dd>
+      <dt>Reader question</dt><dd>${esc(b.readerQuestion || "—")}</dd>
       <dt>Search intent</dt><dd>${esc(b.searchIntent)}</dd>
+      <dt>Decision</dt><dd>${esc(b.decision || "DRAFT_ONLY")} ${b.automaticPublishingEligible ? "(auto-eligible)" : "(not auto-eligible)"}</dd>
+      <dt>Decision reasons</dt><dd>${esc((b.decisionReasons || []).join(" · ") || "—")}</dd>
+      <dt>Topic specificity / uniqueness</dt><dd>${esc(String(b.topicSpecificity ?? "—"))} / ${esc(String(b.uniqueness ?? "—"))}</dd>
+      <dt>Demand class</dt><dd>${esc(b.demandClass || "editorial_business_opportunity")}</dd>
       <dt>Geographic target</dt><dd>${esc(b.geographicTarget)}</dd>
       <dt>Demand evidence</dt><dd>${esc(b.demandEvidence)}</dd>
+      <dt>Proposed H1</dt><dd>${esc(b.proposedH1 || b.proposedTitle)}</dd>
+      <dt>Conversion path</dt><dd>${esc(b.conversionPath || "—")}</dd>
       <dt>Estimated competition</dt><dd>${esc(b.estimatedCompetition)}</dd>
       <dt>Conversion relevance</dt><dd>${esc(b.conversionRelevance)}</dd>
       <dt>Closest existing article</dt><dd>${esc(b.closestExistingTitle || "None")}</dd>
@@ -616,9 +662,22 @@ export function briefReviewPage(args: {
     </dl>
     <h3>Proposed outline</h3>
     <ol>${b.proposedOutline.map(item => `<li>${esc(item)}</li>`).join("")}</ol>
-    <h3>Locked fact sheet</h3>
-    <ul>${[...b.factSheet.businessFacts, ...b.factSheet.productFacts].map(f => `<li>${esc(f)}</li>`).join("") || "<li class=\"muted\">No product facts locked</li>"}</ul>
+    ${b.seoDeliverables ? `<h3>SEO deliverables</h3>
+    <dl class="detail-list">
+      <dt>SEO title</dt><dd>${esc(b.seoDeliverables.seoTitle)}</dd>
+      <dt>H1</dt><dd>${esc(b.seoDeliverables.h1)}</dd>
+      <dt>Canonical</dt><dd>${esc(b.seoDeliverables.canonicalUrl || "—")}</dd>
+      <dt>Meta description</dt><dd>${esc(b.seoDeliverables.metaDescription)} <span class="muted">(${b.seoDeliverables.metaDescription.length} chars)</span></dd>
+      <dt>Image brief / alt</dt><dd>${esc(b.seoDeliverables.imageBrief)}<br><span class="muted">${esc(b.seoDeliverables.imageAltText)}</span></dd>
+      <dt>Structured data</dt><dd>${esc(b.seoDeliverables.structuredDataRecommendation.type)} · ${esc(b.seoDeliverables.structuredDataRecommendation.notes[0] || "")}</dd>
+      <dt>SEO validation</dt><dd>${b.seoDeliverables.validation.ok ? "Pass" : esc(b.seoDeliverables.validation.issues.join("; "))}</dd>
+    </dl>` : ""}
+    <h3>Legends facts (approved)</h3>
+    <ul>${(b.factSheet.legendsFacts || b.factSheet.businessFacts).map(f => `<li>${esc(f)}</li>`).join("") || "<li class=\"muted\">No Legends facts locked</li>"}</ul>
+    <h3>External facts</h3>
+    <ul>${(b.factSheet.externalFacts || []).map(f => `<li>${esc(f.claim)} — <a href="${esc(f.sourceUrl)}" target="_blank" rel="noreferrer">${esc(f.sourceTitle || f.publisher)}</a> <span class="muted">(${esc(f.retrievedAt)})</span></li>`).join("") || "<li class=\"muted\">No external facts locked (source-free articles must avoid technical/statistical claims)</li>"}</ul>
     <p class="muted">${esc(b.factSheet.reviewFlags.join(" · "))}</p>
+    <p class="muted">Failed gates: ${esc((b.failedGates || []).join(", ") || "none")}</p>
     <div class="actions" style="flex-wrap:wrap;gap:.5rem">
       <form method="post" action="/research/briefs/${b.id}/approve-generate">
         <input type="hidden" name="_csrf" value="${esc(args.csrf)}">

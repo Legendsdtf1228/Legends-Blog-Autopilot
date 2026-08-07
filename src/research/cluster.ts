@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { classifyTopic, detectIntentFromKeyword, validateOrReclassify } from "./classification.js";
 import { CONTENT_PILLARS, pillarById } from "./pillars.js";
 import type {
   ArticleFormatId,
@@ -40,26 +41,40 @@ export function jaccard(a: string, b: string): number {
   return inter / (A.size + B.size - inter);
 }
 
-function detectPillar(keyword: string): { pillar: ContentPillarId; subcategory: string } {
+/** Classify keyword into pillar/subcategory with explicit rules first, then seed fallbacks. */
+export function detectPillar(keyword: string): { pillar: ContentPillarId; subcategory: string } {
+  const explicit = classifyTopic(keyword);
+  if (explicit.matchedRule) {
+    return { pillar: explicit.pillar, subcategory: explicit.subcategory };
+  }
+
   const n = normalize(keyword);
   for (const pillar of CONTENT_PILLARS) {
     for (const seed of pillar.seedKeywords) {
       if (n.includes(normalize(seed)) || jaccard(n, seed) >= 0.45) {
-        return { pillar: pillar.id, subcategory: pillar.subcategories[0]! };
+        const validated = validateOrReclassify(keyword, {
+          pillar: pillar.id,
+          subcategory: pillar.subcategories.find(s => jaccard(n, s) >= 0.35) || pillar.subcategories[0]!
+        });
+        return { pillar: validated.pillar, subcategory: validated.subcategory };
       }
     }
     for (const sub of pillar.subcategories) {
-      if (jaccard(n, sub) >= 0.4) return { pillar: pillar.id, subcategory: sub };
+      if (jaccard(n, sub) >= 0.4) {
+        const validated = validateOrReclassify(keyword, { pillar: pillar.id, subcategory: sub });
+        return { pillar: validated.pillar, subcategory: validated.subcategory };
+      }
     }
   }
-  if (/\b(entrepreneur|9-to-5|burnout|quit|owner)\b/.test(n)) {
+
+  if (/\b(entrepreneur|9-to-5|burnout|quit)\b/.test(n)) {
     return { pillar: "honest_entrepreneurship", subcategory: "leaving a 9-to-5" };
   }
   if (/\b(color|logo|brand|design|typography)\b/.test(n)) {
     return { pillar: "design_color_branding", subcategory: "color psychology" };
   }
-  if (/\b(shirt|cotton|polyester|garment|hoodie|brand)\b/.test(n)) {
-    return { pillar: "apparel_garment", subcategory: "T-shirt brand comparisons" };
+  if (/\b(shirt|cotton|polyester|garment|hoodie|embroidery)\b/.test(n)) {
+    return { pillar: "apparel_garment", subcategory: /\bembroidery\b/.test(n) ? "embroidery" : "T-shirt brand comparisons" };
   }
   if (/\b(pricing|startup|wholesale|profit|business)\b/.test(n)) {
     return { pillar: "apparel_business", subcategory: "starting a T-shirt business" };
@@ -67,16 +82,12 @@ function detectPillar(keyword: string): { pillar: ContentPillarId; subcategory: 
   if (/\b(warner robins|middle georgia|legends|storefront)\b/.test(n)) {
     return { pillar: "legends_story", subcategory: "Warner Robins storefront" };
   }
-  return { pillar: "dtf_education", subcategory: "production education" };
+  // Do not default unknown decoration terms into DTF education when embroidery-like.
+  return { pillar: "apparel_business", subcategory: "custom topic" };
 }
 
 function detectIntent(keyword: string): SearchIntent {
-  const n = normalize(keyword);
-  if (/\b(near me|warner robins|middle georgia|local)\b/.test(n)) return "local";
-  if (/\b(buy|price|pricing|cost|order|wholesale)\b/.test(n)) return "transactional";
-  if (/\b(best|vs|versus|compare|review|for)\b/.test(n)) return "commercial";
-  if (/\blegends dtf\b/.test(n)) return "navigational";
-  return "informational";
+  return detectIntentFromKeyword(keyword);
 }
 
 function defaultAudience(pillar: ContentPillarId): AudienceId {
@@ -86,7 +97,6 @@ function defaultAudience(pillar: ContentPillarId): AudienceId {
 function defaultFormat(pillar: ContentPillarId, intent: SearchIntent): ArticleFormatId {
   if (pillar === "honest_entrepreneurship" || pillar === "legends_story") return "first_person_story";
   if (intent === "commercial") return "comparison";
-  if (/\bhow\b|\bprep\b|\bpress\b/.test(pillar)) return "how_to";
   return pillarById(pillar).formats[0]!;
 }
 
@@ -94,7 +104,6 @@ export function clusterSignals(
   signals: ResearchSignal[],
   missingProviders: ResearchProviderId[]
 ): KeywordCluster[] {
-  // Demand-bearing and seed/product signals only for clustering (exclude existing_content overlap noise).
   const candidates = signals.filter(s => s.provider !== "existing_content");
   const used = new Set<number>();
   const clusters: KeywordCluster[] = [];
@@ -113,10 +122,11 @@ export function clusterSignals(
       }
     }
 
-    const { pillar, subcategory } = detectPillar(seed.keyword);
-    const intent = detectIntent(seed.keyword);
+    // Prefer longer, more specific keyword as primary when grouping.
     const keywords = [...new Set(group.map(g => g.keyword))];
-    const primary = keywords.sort((a, b) => a.length - b.length)[0]!;
+    const primary = [...keywords].sort((a, b) => b.length - a.length || a.localeCompare(b))[0]!;
+    const { pillar, subcategory } = detectPillar(primary);
+    const intent = detectIntent(primary);
     const id = createHash("sha1").update(`${pillar}|${intent}|${normalize(primary)}`).digest("hex").slice(0, 16);
 
     clusters.push({
@@ -138,3 +148,5 @@ export function clusterSignals(
 export function isTrivialVariation(a: string, b: string): boolean {
   return jaccard(a, b) >= 0.72;
 }
+
+export { validateOrReclassify, classifyTopic };

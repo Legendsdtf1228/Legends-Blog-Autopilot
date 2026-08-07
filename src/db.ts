@@ -328,9 +328,47 @@ export async function migrate(db: Db): Promise<void> {
     )`);
     await client.query("CREATE INDEX IF NOT EXISTS evidence_reports_article_idx ON evidence_reports(article_id, created_at DESC)");
 
+    await client.query(`CREATE TABLE IF NOT EXISTS research_cycle_runs (
+      id bigserial PRIMARY KEY,
+      slot_key text NOT NULL UNIQUE,
+      collected_at timestamptz NOT NULL DEFAULT now(),
+      decision text NOT NULL DEFAULT 'RUNNING',
+      reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+      opportunity_id text,
+      brief_id bigint REFERENCES article_briefs(id) ON DELETE SET NULL,
+      article_id bigint REFERENCES articles(id) ON DELETE SET NULL,
+      mode text NOT NULL DEFAULT 'draft_only',
+      status text NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running','completed','failed')),
+      started_at timestamptz NOT NULL DEFAULT now(),
+      completed_at timestamptz,
+      error text,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS research_cycle_runs_collected_idx ON research_cycle_runs(collected_at DESC)");
+
+    // 006: atomic claim fields for existing deployments that already have 005
+    await client.query(`ALTER TABLE research_cycle_runs ADD COLUMN IF NOT EXISTS article_id bigint REFERENCES articles(id) ON DELETE SET NULL`);
+    await client.query(`ALTER TABLE research_cycle_runs ADD COLUMN IF NOT EXISTS status text`);
+    await client.query(`ALTER TABLE research_cycle_runs ADD COLUMN IF NOT EXISTS started_at timestamptz`);
+    await client.query(`ALTER TABLE research_cycle_runs ADD COLUMN IF NOT EXISTS completed_at timestamptz`);
+    await client.query(`ALTER TABLE research_cycle_runs ADD COLUMN IF NOT EXISTS error text`);
+    await client.query(`UPDATE research_cycle_runs SET status='completed' WHERE status IS NULL`);
+    await client.query(`UPDATE research_cycle_runs SET started_at=COALESCE(started_at, created_at, collected_at, now()) WHERE started_at IS NULL`);
+    await client.query(`ALTER TABLE research_cycle_runs ALTER COLUMN status SET DEFAULT 'running'`);
+    await client.query(`ALTER TABLE research_cycle_runs ALTER COLUMN status SET NOT NULL`);
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE research_cycle_runs ADD CONSTRAINT research_cycle_runs_status_check
+          CHECK (status IN ('running','completed','failed'));
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+
     await client.query(
       `INSERT INTO schema_migrations(id) VALUES
-        ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research')
+        ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research'),
+        ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim')
        ON CONFLICT DO NOTHING`
     );
 

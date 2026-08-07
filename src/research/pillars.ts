@@ -1,11 +1,13 @@
 import type {
   ArticleFormatId,
   AudienceId,
+  AutoPublishThresholds,
   ContentPillarId,
   PillarBalance,
   ResearchSettings,
   ScoringWeights
 } from "./types.js";
+import { DEFAULT_AUTO_THRESHOLDS } from "./outcomes.js";
 
 export const DEFAULT_SCORING_WEIGHTS: ScoringWeights = {
   demandScore: 0.15,
@@ -34,7 +36,9 @@ export const DEFAULT_RESEARCH_SETTINGS: ResearchSettings = {
   weights: DEFAULT_SCORING_WEIGHTS,
   pillarBalance: DEFAULT_PILLAR_BALANCE,
   overlapRejectThreshold: 0.72,
-  requireInterviewForFirstPerson: true
+  requireInterviewForFirstPerson: true,
+  autoThresholds: DEFAULT_AUTO_THRESHOLDS,
+  minTopicSpecificity: 0.85
 };
 
 export function researchSettingsFromApp(research: {
@@ -45,6 +49,8 @@ export function researchSettingsFromApp(research: {
   requireInterviewForFirstPerson: boolean;
   weights: ScoringWeights;
   pillarBalance: PillarBalance;
+  autoThresholds?: AutoPublishThresholds;
+  minTopicSpecificity?: number;
 }): ResearchSettings {
   return {
     enabled: research.enabled,
@@ -53,7 +59,9 @@ export function researchSettingsFromApp(research: {
     overlapRejectThreshold: research.overlapRejectThreshold,
     requireInterviewForFirstPerson: research.requireInterviewForFirstPerson,
     weights: research.weights,
-    pillarBalance: research.pillarBalance
+    pillarBalance: research.pillarBalance,
+    autoThresholds: research.autoThresholds ?? DEFAULT_AUTO_THRESHOLDS,
+    minTopicSpecificity: research.minTopicSpecificity ?? 0.85
   };
 }
 
@@ -101,15 +109,21 @@ export const CONTENT_PILLARS: PillarDefinition[] = [
       "cotton polyester blends",
       "fit sizing softness shrinkage",
       "choosing blanks",
-      "hoodies polos workwear"
+      "hoodies polos workwear",
+      "embroidery",
+      "decoration comparison"
     ],
     seedKeywords: [
       "best T-shirt brands for printing",
       "shirt fabric and weight",
       "cotton vs polyester shirts",
       "custom shirts",
-      "hoodies for printing"
+      "hoodies for printing",
+      "embroidery",
+      "embroidery vs DTF for work shirts",
+      "embroidery for work shirts"
     ],
+    // subcategory "embroidery" and "decoration comparison" used by classification rules
     audiences: ["garment_comparison_shoppers", "apparel_decorators", "new_brand_owners", "schools_teams"],
     formats: ["comparison", "buyers_guide", "checklist", "faq"]
   },
