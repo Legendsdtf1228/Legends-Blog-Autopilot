@@ -276,7 +276,7 @@ export const BASE_SEED_CATEGORIES = [
   "small-business burnout",
   "business growth lessons",
   "custom apparel business",
-  "local small-business stories"
+  "how to choose a local custom shirt printer"
 ];
 
 export const ENTREPRENEURSHIP_INTERVIEW_QUESTIONS = [

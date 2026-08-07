@@ -29,6 +29,8 @@ export const CLASSIFICATION_RULES: ClassificationRule[] = [
   { pattern: /\b(hoodie|polo|workwear|performance apparel|blanks?)\b/i, pillar: "apparel_garment", subcategory: "choosing blanks", priority: 70 },
 
   // Apparel business
+  // Apparel business / local printer selection
+  { pattern: /\bhow to choose a local custom shirt printer\b|\bchoose a (local )?(custom )?(shirt|apparel) printer\b/i, pillar: "apparel_business", subcategory: "choosing a print partner", priority: 92 },
   { pattern: /\bpricing custom shirts?\b|\bpricing for profit\b|\bgarment and transfer costs?\b/i, pillar: "apparel_business", subcategory: "pricing for profit", priority: 90 },
   { pattern: /\bstarting a t-?shirt business\b|\bclothing-?brand startup\b|\bcustom apparel business\b/i, pillar: "apparel_business", subcategory: "starting a T-shirt business", priority: 88 },
   { pattern: /\b(wholesale|retail decisions|customer acquisition|gang-?sheet economics)\b/i, pillar: "apparel_business", subcategory: "customer acquisition", priority: 75 },

@@ -1,3 +1,8 @@
+import {
+  assessGeneratedArticleSemantics,
+  isQuarantinedArticle
+} from "./semanticIntent.js";
+
 export type FindingSeverity = "critical" | "major" | "minor" | "pass";
 
 export interface EditorialFinding {
@@ -24,6 +29,9 @@ export function runEditorialReview(args: {
   overlapScore: number;
   hasPlaceholderLanguage: boolean;
   demandLabel?: string;
+  audienceLabel?: string;
+  businessFacts?: string[];
+  productTitles?: string[];
 }): EditorialReview {
   const findings: EditorialFinding[] = [];
   const text = args.bodyHtml.replace(/<[^>]+>/g, " ");
@@ -32,8 +40,14 @@ export function runEditorialReview(args: {
     findings.push({ gate, severity, detail });
   };
 
+  if (isQuarantinedArticle(args.title, args.primaryKeyword)) {
+    push("quarantined_article", "critical", "Known failed article; must be REJECTED and excluded from rollout.");
+  }
+
   if (/^a practical guide to\b/i.test(args.title)) {
     push("title_specificity", "major", "Generic “A Practical Guide to X” title.");
+  } else if (/decision checklist for apparel buyers/i.test(args.title) && /\bstories\b/i.test(args.primaryKeyword)) {
+    push("title_specificity", "critical", "Title does not represent a real search question for the keyword.");
   } else if (args.title.length < 25) {
     push("title_specificity", "major", "Title too weak/short.");
   } else {
@@ -87,6 +101,18 @@ export function runEditorialReview(args: {
 
   if (/\b(scientifically proven to increase sales|universally means)\b/i.test(text)) {
     push("color_or_science_overclaim", "major", "Overstated scientific/color claim.");
+  }
+
+  const semantics = assessGeneratedArticleSemantics({
+    title: args.title,
+    primaryKeyword: args.primaryKeyword,
+    bodyHtml: args.bodyHtml,
+    businessFacts: args.businessFacts,
+    productTitles: args.productTitles,
+    audienceLabel: args.audienceLabel
+  });
+  for (const f of semantics.findings) {
+    push(f.gate, f.severity, f.detail);
   }
 
   const critical = findings.filter(f => f.severity === "critical").length;

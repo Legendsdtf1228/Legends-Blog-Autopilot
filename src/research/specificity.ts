@@ -1,4 +1,9 @@
 import type { KeywordCluster } from "./types.js";
+import {
+  assessSemanticAlignment,
+  isIncoherentSearchIntent,
+  suggestLocalPrinterRefinement
+} from "./semanticIntent.js";
 
 export interface SpecificityAssessment {
   score: number;
@@ -49,6 +54,9 @@ export function suggestRefinement(keyword: string): {
       intent: "commercial",
       readerQuestion: "Is DTF or vinyl the better decoration method for small apparel runs?"
     };
+  }
+  if (isIncoherentSearchIntent(n) || /\blocal small-?business stories\b/i.test(n)) {
+    return suggestLocalPrinterRefinement();
   }
   return null;
 }
@@ -110,9 +118,35 @@ export function assessTopicSpecificity(args: {
     reasons.push("No clear unique angle or distinct-question explanation.");
   }
 
+  const semantic = assessSemanticAlignment({
+    primaryKeyword: keyword,
+    proposedTitle: args.proposedTitle,
+    audienceLabel: args.audienceLabel,
+    outline: args.outline,
+    whyDistinct: args.whyDistinct
+    // readerQuestion intentionally omitted — specificity runs before the brief locks a question
+  });
+  if (!semantic.ok) {
+    score = Math.min(score, semantic.score);
+    reasons.push(...semantic.reasons);
+  }
+
   score = Math.max(0, Math.min(1, score));
-  const refinement = suggestRefinement(keyword);
-  const ok = score >= 0.85 && !BROAD_ONE_WORD.test(keyword) && !(args.proposedTitle && GENERIC_TITLE.test(args.proposedTitle));
+  const refinement = suggestRefinement(keyword) || (semantic.refinedKeyword
+    ? {
+        keyword: semantic.refinedKeyword,
+        title: semantic.refinedTitle || suggestLocalPrinterRefinement().title,
+        audience: semantic.audienceHint || suggestLocalPrinterRefinement().audience,
+        intent: semantic.intentHint || "local",
+        readerQuestion: semantic.readerQuestion || suggestLocalPrinterRefinement().readerQuestion
+      }
+    : null);
+  const ok =
+    score >= 0.85 &&
+    semantic.ok &&
+    !BROAD_ONE_WORD.test(keyword) &&
+    !(args.proposedTitle && GENERIC_TITLE.test(args.proposedTitle)) &&
+    !isIncoherentSearchIntent(keyword);
 
   return {
     score: Number(score.toFixed(4)),

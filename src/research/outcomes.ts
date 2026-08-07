@@ -53,11 +53,22 @@ export function decideTopicOutcome(args: {
   specificityOk: boolean;
   overlapRejected: boolean;
   classificationInvalid?: boolean;
+  /** Pre-generation semantic misalignment (keyword/title/audience/intent). */
+  semanticRejected?: boolean;
+  semanticReasons?: string[];
 }): { decision: TopicDecision; reasons: string[] } {
   const t = args.thresholds ?? DEFAULT_AUTO_THRESHOLDS;
   const reasons: string[] = [];
   const s = args.scorecard;
 
+  if (args.semanticRejected) {
+    return {
+      decision: "REJECTED",
+      reasons: args.semanticReasons?.length
+        ? args.semanticReasons
+        : ["Failed semantic alignment among keyword, reader, title, angle, and conversion path."]
+    };
+  }
   if (args.overlapRejected || args.classificationInvalid) {
     return { decision: "REJECTED", reasons: ["Failed overlap or classification validation."] };
   }

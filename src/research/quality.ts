@@ -1,6 +1,11 @@
 import { countWords } from "../content.js";
 import { runEditorialReview } from "./editorial.js";
-import { validateInternalLinks, type InternalLinkCandidate } from "./links.js";
+import { validateInternalLinks, type InternalLinkCandidate, assessInternalLinkRelevance } from "./links.js";
+import {
+  assessGeneratedArticleSemantics,
+  assessSemanticAlignment,
+  isQuarantinedArticle
+} from "./semanticIntent.js";
 import { buildSeoDeliverables, validateSeoDeliverables } from "./seo.js";
 import type { ArticleBrief, EvidenceReport } from "./types.js";
 
@@ -48,6 +53,71 @@ export function runQualityGates(args: {
     detail: "Reject generic Practical Guide titles.",
     severity: "major"
   });
+
+  const quarantined = isQuarantinedArticle(args.draft.title, args.brief.primaryKeyword);
+  results.push({
+    gate: "quarantined_article",
+    ok: !quarantined,
+    detail: quarantined
+      ? "Known failed article; REJECTED and excluded from rollout drafts."
+      : "Not a quarantined article.",
+    severity: "critical"
+  });
+
+  const preGenSemantic = assessSemanticAlignment({
+    primaryKeyword: args.brief.primaryKeyword,
+    proposedTitle: args.draft.title,
+    readerQuestion: args.brief.readerQuestion,
+    audienceLabel: args.brief.targetAudienceLabel,
+    outline: args.brief.proposedOutline,
+    whyDistinct: args.brief.whyDistinct,
+    conversionPath: args.brief.conversionPath,
+    searchIntent: args.brief.searchIntent,
+    format: args.brief.format,
+    productTitles: args.brief.productsToFeature.map(p => p.title)
+  });
+  results.push({
+    gate: "semantic_intent_alignment",
+    ok: preGenSemantic.ok && !quarantined,
+    detail: preGenSemantic.ok
+      ? "Keyword, reader, title, outline, and conversion path are aligned."
+      : preGenSemantic.reasons.join(" "),
+    severity: "critical"
+  });
+
+  const linkRelevance = assessInternalLinkRelevance({
+    primaryKeyword: args.brief.primaryKeyword,
+    title: args.draft.title,
+    readerQuestion: args.brief.readerQuestion,
+    productTitles: args.brief.productsToFeature.map(p => p.title),
+    bodyHtml: args.draft.bodyHtml
+  });
+  results.push({
+    gate: "internal_link_relevance",
+    ok: linkRelevance.ok,
+    detail: linkRelevance.ok
+      ? "Internal product links are relevant to the article intent."
+      : linkRelevance.reasons.join(" "),
+    severity: "major"
+  });
+
+  // Surface post-generation semantic/technical findings as quality gates too
+  const generatedSemantics = assessGeneratedArticleSemantics({
+    title: args.draft.title,
+    primaryKeyword: args.brief.primaryKeyword,
+    bodyHtml: args.draft.bodyHtml,
+    businessFacts: args.brief.factSheet.legendsFacts || args.brief.factSheet.businessFacts,
+    productTitles: args.brief.productsToFeature.map(p => p.title),
+    audienceLabel: args.brief.targetAudienceLabel
+  });
+  for (const finding of generatedSemantics.findings) {
+    results.push({
+      gate: `semantic_${finding.gate}`,
+      ok: finding.severity === "minor",
+      detail: finding.detail,
+      severity: finding.severity
+    });
+  }
 
   results.push({
     gate: "placeholder_outline",
@@ -184,7 +254,10 @@ export function runQualityGates(args: {
     brokenLinks: linkCheck.broken,
     overlapScore: args.brief.overlapScore,
     hasPlaceholderLanguage: /practical steps or comparisons|lorem ipsum|TODO:/i.test(bodyText),
-    demandLabel: args.brief.demandEvidence
+    demandLabel: args.brief.demandEvidence,
+    audienceLabel: args.brief.targetAudienceLabel,
+    businessFacts: args.brief.factSheet.legendsFacts || args.brief.factSheet.businessFacts,
+    productTitles: args.brief.productsToFeature.map(p => p.title)
   });
 
   return {

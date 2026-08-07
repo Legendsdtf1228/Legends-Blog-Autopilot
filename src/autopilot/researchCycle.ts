@@ -37,6 +37,7 @@ import {
   type ResearchCycleResult,
   type ResearchOpportunity
 } from "../research/index.js";
+import { countsTowardRolloutDraft, quarantineFailedRolloutArticles } from "../research/quarantine.js";
 import { getProductLinks, publishArticle } from "../shopify.js";
 import type { GeneratedArticle, ProductLink, Settings } from "../types.js";
 import { generateArticle as defaultGenerateArticle } from "../writer.js";
@@ -184,6 +185,15 @@ function postGenerationDecision(args: {
     + (args.evidence.editorialFindings || []).filter(f => f.severity === "major").length;
   const gatesOk = qualityGatesPassed(args.evidence);
   const linkGate = args.evidence.qualityGateResults.find(g => g.gate === "internal_links");
+  const semanticFail = (args.evidence.qualityGateResults || []).some(g =>
+    !g.ok &&
+    g.severity === "critical" &&
+    /semantic|quarantined|uv_dtf|incoherent|audience_purpose|forced_internal|template/i.test(g.gate)
+  ) || (args.evidence.editorialFindings || []).some(f =>
+    f.severity === "critical" &&
+    /quarantined|uv_dtf|incoherent|audience_purpose|forced_internal|title_specificity|template/i.test(f.gate)
+  );
+
   const scorecard = scorecardFromOpportunity({
     scores: args.brief.scores,
     topicSpecificity: args.brief.topicSpecificity,
@@ -204,7 +214,14 @@ function postGenerationDecision(args: {
     requiresInterview: args.brief.requiresInterview,
     interviewComplete: args.interviewComplete,
     specificityOk: args.brief.topicSpecificity >= args.settings.research.minTopicSpecificity,
-    overlapRejected: args.brief.overlapScore >= args.settings.research.overlapRejectThreshold
+    overlapRejected: args.brief.overlapScore >= args.settings.research.overlapRejectThreshold,
+    semanticRejected: semanticFail,
+    semanticReasons: [
+      ...(args.evidence.qualityGateResults || []).filter(g => !g.ok).map(g => `${g.gate}: ${g.detail}`),
+      ...(args.evidence.editorialFindings || [])
+        .filter(f => f.severity === "critical" || f.severity === "major")
+        .map(f => `${f.gate}: ${f.detail}`)
+    ].filter(r => /semantic|quarantined|uv_dtf|incoherent|audience|forced_internal|insufficient|template|turnaround|pressing/i.test(r))
   });
 
   const brief: ArticleBrief = {
@@ -217,7 +234,8 @@ function postGenerationDecision(args: {
         .filter(f => f.severity === "critical" || f.severity === "major")
         .map(f => f.gate)
     ],
-    automaticPublishingEligible: outcome.decision === "AUTO_ELIGIBLE" && gatesOk
+    automaticPublishingEligible: outcome.decision === "AUTO_ELIGIBLE" && gatesOk,
+    status: outcome.decision === "REJECTED" ? "rejected" : args.brief.status
   };
   const evidence: EvidenceReport = {
     ...args.evidence,
@@ -347,37 +365,58 @@ async function generateArticleFromBrief(args: {
     settings: args.settings,
     interviewComplete: Boolean(!brief.requiresInterview || interview?.completed)
   });
-  brief = { ...decided.brief, status: "approved" as ArticleBrief["status"] };
+  brief = {
+    ...decided.brief,
+    status: decided.brief.decision === "REJECTED" ? "rejected" : "approved"
+  };
   evidence = decided.evidence;
 
   const gatesOk = qualityGatesPassed(evidence);
+  const rejected = brief.decision === "REJECTED";
   await updateArticle(args.db, placeholder.id, {
     ...normalizeArticle(fromGenerated(generated, args.settings.authorName), { author: args.settings.authorName }).content,
-    status: "draft",
-    generationError: gatesOk ? null : "Quality gates flagged issues — review evidence report before publishing.",
-    lastError: gatesOk ? null : evidence.reviewFlags.join("; ").slice(0, 500),
+    // REJECTED articles are archived so they never count toward the 30-draft rollout.
+    status: rejected ? "archived" : "draft",
+    generationError: rejected
+      ? `REJECTED: ${(brief.decisionReasons || []).join("; ").slice(0, 400)}`
+      : gatesOk
+        ? null
+        : "Quality gates flagged issues — review evidence report before publishing.",
+    lastError: rejected || !gatesOk
+      ? evidence.reviewFlags.join("; ").slice(0, 500)
+      : null,
     generationSettings: {
       briefId: brief.id,
       opportunityId: brief.opportunityId,
       researchPipeline: true,
       decision: brief.decision,
-      automaticPublishingEligible: brief.automaticPublishingEligible,
-      slotKey: args.slotKey
+      automaticPublishingEligible: !rejected && brief.automaticPublishingEligible,
+      countsTowardRollout: !rejected && countsTowardRolloutDraft({
+        title: generated.title,
+        primaryKeyword: generated.primaryKeyword,
+        decision: brief.decision,
+        status: rejected ? "archived" : "draft"
+      }),
+      slotKey: args.slotKey,
+      rejected: rejected || undefined,
+      rejectionReasons: rejected ? brief.decisionReasons : undefined
     }
   });
   await updateBrief(args.db, brief.id!, brief);
   await attachBriefArticle(args.db, brief.id!, placeholder.id);
   await saveEvidenceReport(args.db, placeholder.id, brief.id!, evidence);
-  await markOpportunityStatus(args.db, brief.opportunityId, "used");
-  await recordPillarUsage(args.db, {
-    pillar: brief.pillar,
-    subcategory: brief.subcategory,
-    audience: brief.audience,
-    format: brief.format,
-    primaryKeyword: brief.primaryKeyword,
-    articleId: placeholder.id,
-    usedAt: new Date().toISOString()
-  });
+  await markOpportunityStatus(args.db, brief.opportunityId, rejected ? "rejected" : "used");
+  if (!rejected) {
+    await recordPillarUsage(args.db, {
+      pillar: brief.pillar,
+      subcategory: brief.subcategory,
+      audience: brief.audience,
+      format: brief.format,
+      primaryKeyword: brief.primaryKeyword,
+      articleId: placeholder.id,
+      usedAt: new Date().toISOString()
+    });
+  }
 
   return { articleId: placeholder.id, generated, evidence, brief };
 }
@@ -417,6 +456,12 @@ export async function executeScheduledResearchCycle(args: {
       reasons: [`Rollout mode ${mode} does not run research.`],
       mode
     };
+  }
+
+  try {
+    await quarantineFailedRolloutArticles(args.db);
+  } catch {
+    /* non-fatal — gates still reject at generation/quality time */
   }
 
   const claim = await claimResearchSlot(args.db, args.slotKey, mode, abandonedClaimMinutes);

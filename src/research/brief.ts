@@ -198,7 +198,12 @@ export function evaluateCustomTopic(topic: string, args: {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
   let cluster = clusterFromCustomTopic(topic);
   const refinement = suggestRefinement(topic);
-  if (refinement && topic.trim().split(/\s+/).length <= 2) {
+  if (
+    refinement &&
+    (topic.trim().split(/\s+/).length <= 2 ||
+      /\blocal small-?business stories\b/i.test(topic) ||
+      /\bstories\b/i.test(topic))
+  ) {
     cluster = clusterFromCustomTopic(refinement.keyword);
   }
 
@@ -222,16 +227,23 @@ export function evaluateCustomTopic(topic: string, args: {
     proposedTitle,
     outline,
     audienceLabel: refinement?.audience || AUDIENCE_LABELS[cluster.audience],
-    whyDistinct: "Merchant-entered topic"
+    whyDistinct: "Merchant-entered topic",
+    // Pass through semantic fields when available via assessTopicSpecificity only
   });
-  if (specificity.score < settings.minTopicSpecificity) {
+
+  // Unrefined incoherent story keywords must not generate.
+  const stillIncoherent =
+    /\blocal small-?business stories\b/i.test(cluster.primaryKeyword) ||
+    (/\bstories\b/i.test(cluster.primaryKeyword) && !refinement);
+
+  if (stillIncoherent || specificity.score < settings.minTopicSpecificity || !specificity.ok) {
     return {
       ok: false,
       overlap: null,
       topic,
       message: specificity.refinedKeyword
-        ? `Topic is too broad. Try a qualified angle such as “${specificity.refinedKeyword}”.`
-        : "Topic is too broad or generic to generate a useful article.",
+        ? `Topic is too broad or incoherent. Try a qualified angle such as “${specificity.refinedKeyword}”.`
+        : "Topic is too broad, incoherent, or generic to generate a useful article.",
       specificityReasons: specificity.reasons
     };
   }

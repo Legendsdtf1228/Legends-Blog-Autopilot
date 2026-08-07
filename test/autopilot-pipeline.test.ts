@@ -124,7 +124,7 @@ function emptyInventory() {
 }
 
 function makeGenerated(briefTitle: string, keyword: string): GeneratedArticle {
-  const body = `<h2>Compare decoration methods for work shirts</h2><p>${"Practical guidance for small-business owners choosing embroidery or DTF for employee uniforms. ".repeat(40)}</p><p>Legends DTF Prints is located in Warner Robins, Georgia and serves Middle Georgia.</p>`;
+  const body = `<h2>Compare decoration methods for work shirts</h2><p>${"Practical guidance for small-business owners choosing embroidery or DTF for employee uniforms. ".repeat(45)}</p><p>Legends DTF Prints is located in Warner Robins, Georgia and serves Middle Georgia.</p>`;
   return {
     title: briefTitle.slice(0, 70),
     handle: "embroidery-vs-dtf-for-work-shirts",

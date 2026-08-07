@@ -8,6 +8,8 @@ export * from "./outcomes.js";
 export * from "./links.js";
 export * from "./editorial.js";
 export * from "./seo.js";
+export * from "./semanticIntent.js";
+export * from "./quarantine.js";
 export * from "./overlap.js";
 export * from "./rotation.js";
 export * from "./engine.js";

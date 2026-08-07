@@ -28,6 +28,7 @@ import {
   type UsageRecord
 } from "./rotation.js";
 import { demandFromSignals, formatCollectedLabel, growthFromSignals, scoreOpportunity } from "./scoring.js";
+import { isIncoherentSearchIntent, isQuarantinedArticle } from "./semanticIntent.js";
 import { assessTopicSpecificity, buildTopicSpecificOutline, suggestRefinement } from "./specificity.js";
 import type {
   DataCompleteness,
@@ -115,6 +116,10 @@ function buildTitle(cluster: { primaryKeyword: string; format: string; intent: s
     return `${k}: Honest Lessons From Building a Print Business`;
   }
   if (cluster.format === "checklist") {
+    // Avoid pairing checklist titles with incoherent / story keywords.
+    if (/\bstories?\b/i.test(cluster.primaryKeyword) || isIncoherentSearchIntent(cluster.primaryKeyword)) {
+      return `${k}: Practical Questions Local Buyers Should Ask`;
+    }
     return `${k}: A Decision Checklist for Apparel Buyers`;
   }
   return `${k}: What ${cluster.subcategory.replace(/\b\w/g, c => c.toUpperCase())} Buyers Should Know`;
@@ -226,8 +231,13 @@ export async function runResearchCycle(args: {
       (cluster.format === "first_person_story" || cluster.pillar === "honest_entrepreneurship" || cluster.pillar === "legends_story");
 
     const refinement = suggestRefinement(cluster.primaryKeyword);
-    // Auto-refine broad seeds into qualified long-tails when possible
-    if (refinement && cluster.primaryKeyword.trim().split(/\s+/).length <= 2) {
+    // Auto-refine broad seeds and incoherent search intents before generation.
+    const shouldRefine =
+      Boolean(refinement) &&
+      (cluster.primaryKeyword.trim().split(/\s+/).length <= 2 ||
+        isIncoherentSearchIntent(cluster.primaryKeyword) ||
+        isQuarantinedArticle("", cluster.primaryKeyword));
+    if (shouldRefine && refinement) {
       cluster.primaryKeyword = refinement.keyword;
       cluster.secondaryKeywords = [...new Set([cluster.primaryKeyword, ...cluster.secondaryKeywords])].slice(0, 8);
       const again = validateOrReclassify(cluster.primaryKeyword, {
@@ -236,20 +246,36 @@ export async function runResearchCycle(args: {
       });
       cluster.pillar = again.pillar;
       cluster.subcategory = again.subcategory;
+  // Prefer commercial / local formats for printer-selection refinements.
+      if (refinement.intent === "local" || refinement.intent === "commercial") {
+        cluster.intent = refinement.intent === "local" ? "local" : "commercial";
+        if (cluster.format === "first_person_story") {
+          cluster.format = "checklist";
+        }
+      }
     }
 
-    const proposedTitle = buildTitle(cluster);
+    const proposedTitle = refinement && shouldRefine ? refinement.title : buildTitle(cluster);
     const readerQuestion = refinement?.readerQuestion
       || `What should ${AUDIENCE_LABELS[cluster.audience].toLowerCase()} know about ${cluster.primaryKeyword}?`;
     const proposedOutline = buildTopicSpecificOutline(cluster, readerQuestion);
+    const audienceLabel = refinement?.audience || AUDIENCE_LABELS[cluster.audience];
 
     const specificity = assessTopicSpecificity({
       primaryKeyword: cluster.primaryKeyword,
       proposedTitle,
       outline: proposedOutline,
-      audienceLabel: refinement?.audience || AUDIENCE_LABELS[cluster.audience],
+      audienceLabel,
       whyDistinct: closest ? `Different angle from “${closest.title}”` : "No close match"
     });
+
+    // If semantic alignment still fails after attempted refinement, reject before generation.
+    const semanticRejected =
+      isIncoherentSearchIntent(cluster.primaryKeyword) ||
+      isQuarantinedArticle(proposedTitle, cluster.primaryKeyword) ||
+      (!specificity.ok && specificity.reasons.some(r =>
+        /coherent apparel-buyer search intent|Audience\/purpose drift|Title does not represent/i.test(r)
+      ));
 
     const uniqueness = uniquenessFromOverlap(closest?.score ?? 0);
     const sourceQuality = demandClass === "verified_demand" ? 0.85 : demandClass === "inferred_opportunity" ? 0.55 : 0.45;
@@ -267,12 +293,19 @@ export async function runResearchCycle(args: {
       thresholds: settings.autoThresholds,
       requiresInterview,
       interviewComplete: false,
-      specificityOk: specificity.score >= settings.minTopicSpecificity && !specificity.reasons.some(r => /Broad one-word|Generic title|placeholder/i.test(r)),
+      specificityOk:
+        specificity.ok &&
+        specificity.score >= settings.minTopicSpecificity &&
+        !specificity.reasons.some(r => /Broad one-word|Generic title|placeholder|coherent apparel-buyer|Audience\/purpose drift/i.test(r)),
       overlapRejected,
-      classificationInvalid: false
+      classificationInvalid: false,
+      semanticRejected,
+      semanticReasons: specificity.reasons.filter(r =>
+        /coherent apparel-buyer|Audience\/purpose drift|Title does not represent|quarantined|template/i.test(r)
+      )
     });
 
-    // Skip rejected broad/overlap topics from the candidate list entirely
+    // Skip rejected broad/overlap/semantic topics from the candidate list entirely
     if (outcome.decision === "REJECTED") continue;
 
     const failedGates = [
