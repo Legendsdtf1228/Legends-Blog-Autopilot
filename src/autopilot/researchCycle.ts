@@ -188,7 +188,11 @@ function postGenerationDecision(args: {
     scores: args.brief.scores,
     topicSpecificity: args.brief.topicSpecificity,
     uniqueness: args.brief.uniqueness,
-    sourceQuality: args.brief.externalSources.length ? 0.8 : 0.55,
+    sourceQuality: args.brief.externalSources.length
+      ? 0.85
+      : ((args.brief.factSheet.legendsFacts?.length || args.brief.factSheet.businessFacts.length)
+        ? 0.7 // approved Legends-only / source-free stable facts
+        : 0.4),
     articleQuality: gatesOk ? 0.95 : 0.4,
     internalLinkConfidence: linkGate?.ok === false ? 0 : (args.brief.internalLinks.length ? 0.9 : 0.75),
     criticalViolations: critical,
@@ -385,6 +389,8 @@ export async function executeScheduledResearchCycle(args: {
   slotKey: string;
   actor?: string;
   deps?: ResearchCycleDeps;
+  /** Optional locked settings snapshot (tests / callers that already loaded settings). */
+  settingsOverride?: Settings;
 }): Promise<ResearchCycleRunResult> {
   const deps = args.deps || {};
   const loadInventory = deps.loadContentInventory || loadContentInventory;
@@ -392,7 +398,7 @@ export async function executeScheduledResearchCycle(args: {
   const publish = deps.publishArticle || publishArticle;
   const abandonedClaimMinutes = deps.abandonedClaimMinutes ?? DEFAULT_ABANDONED_MINUTES;
 
-  const settings = await getSettings(args.db);
+  const settings = args.settingsOverride ?? (await getSettings(args.db));
   const mode = settings.rolloutMode;
 
   if (settings.killSwitch.paused) {
@@ -581,6 +587,11 @@ export async function executeScheduledResearchCycle(args: {
           articleReady: auth.articleReady,
           settingsReady: auth.settingsReady,
           frequencyReady: auth.frequencyReady,
+          promotionReady: auth.promotionReady,
+          articleReasons: auth.articleReasons,
+          promotionReasons: auth.promotionReasons,
+          frequencyReasons: auth.frequencyReasons,
+          livePublicationReasons: auth.livePublicationReasons,
           reasons: auth.reasons,
           mode,
           decision: brief.decision

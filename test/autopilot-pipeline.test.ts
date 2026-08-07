@@ -459,10 +459,10 @@ test("inconsistent persisted auto_publish settings cannot bypass authorizeAutoma
   await db.end();
 });
 
-test("SHADOW_AUTO records fully evaluated would-publish without publishing", async () => {
+test("SHADOW_AUTO cycle records wouldPublish without calling Shopify", async () => {
   const db = createDb(databaseUrl);
   await migrate(db);
-  await withSettings(db, {
+  const lockedSettings = await withSettings(db, {
     enabled: true,
     draftOnlyMode: true,
     rolloutMode: "shadow_auto",
@@ -470,20 +470,47 @@ test("SHADOW_AUTO records fully evaluated would-publish without publishing", asy
       consecutiveReviewedDrafts: 30,
       merchantApprovalRate: 0.95,
       shadowAutoDays: 14,
-      autoPublishExplicitlyActivated: true
-    }
+      autoPublishExplicitlyActivated: false
+    },
+    frequencyLimits: { maxArticlesPerCycle: 1, maxPublishedPerRolling7Days: 10_000, minHoursBetweenPublishes: 0 }
   });
 
   let publishCalls = 0;
   const opportunity = makeOpportunity();
+  opportunity.scores = {
+    ...opportunity.scores,
+    opportunityScore: 0.88,
+    businessRelevance: 0.9,
+    factualConfidence: 0.95,
+    conversionIntent: 0.8
+  };
+  opportunity.topicSpecificity = 0.92;
+  opportunity.uniqueness = 0.95;
+
   const result = await executeScheduledResearchCycle({
     db,
     config: fakeConfig,
     slotKey: `research:shadow:${Date.now()}`,
+    settingsOverride: lockedSettings,
     deps: {
       loadContentInventory: async () => emptyInventory(),
       runResearchCycle: async () => makeCycleResult(opportunity),
-      generateArticle: async ({ brief }) => makeGenerated(brief!.proposedTitle, brief!.primaryKeyword),
+      generateArticle: async ({ brief }) => {
+        const meta = `${brief!.primaryKeyword}: compare durability, detail, cost, and turnaround for uniform buyers with Legends DTF Prints.`;
+        const padded = meta.length >= 145 ? meta.slice(0, 160) : (meta + " See current options on legendsdtf.com today.").slice(0, 160);
+        const paragraph = "Practical guidance for small-business owners choosing embroidery or DTF for employee work-shirt uniforms with clear commercial tradeoffs. ";
+        return {
+          title: (brief!.proposedTitle.length >= 25 ? brief!.proposedTitle : "Embroidery vs. DTF Printing: Which Is Better for Work Shirts?").slice(0, 70),
+          handle: brief!.proposedHandle || "embroidery-vs-dtf-for-work-shirts",
+          summary: padded.slice(0, 200),
+          metaDescription: padded,
+          bodyHtml: `<h2>Compare decoration methods for work shirts</h2><p>${paragraph.repeat(30)}</p><h2>Decision checklist</h2><p>${paragraph.repeat(15)}</p><p>Legends DTF Prints is located in Warner Robins, Georgia and serves Middle Georgia.</p>`,
+          tags: ["embroidery", "DTF", "work shirts"],
+          primaryKeyword: brief!.primaryKeyword,
+          topicFingerprint: "embroidery-vs-dtf-work-shirts",
+          rationale: "Commercial comparison from research brief"
+        };
+      },
       publishArticle: async () => {
         publishCalls += 1;
         throw new Error("SHADOW_AUTO must not publish");
@@ -494,17 +521,18 @@ test("SHADOW_AUTO records fully evaluated would-publish without publishing", asy
 
   assert.ok(result.articleId);
   assert.equal(publishCalls, 0);
-  assert.equal(typeof result.wouldPublish, "boolean");
+  assert.equal(result.wouldPublish, true, result.reasons.join("; "));
   const article = await getArticle(db, result.articleId!);
   assert.equal(article?.status, "draft");
   assert.equal(article?.shopifyArticleId, null);
 
-  const { rows } = await db.query<{ action: string; detail: { wouldPublish?: boolean; reasons?: string[] } }>(
-    `SELECT action, detail FROM audit_events WHERE article_id=$1 AND action='shadow_auto_decision' ORDER BY id DESC LIMIT 1`,
+  const { rows } = await db.query<{ detail: { wouldPublish?: boolean; ok?: boolean } }>(
+    `SELECT detail FROM audit_events WHERE article_id=$1 AND action='shadow_auto_decision' ORDER BY id DESC LIMIT 1`,
     [result.articleId]
   );
   assert.ok(rows[0]);
-  assert.equal(typeof rows[0]!.detail.wouldPublish, "boolean");
+  assert.equal(rows[0]!.detail.wouldPublish, true);
+  assert.equal(rows[0]!.detail.ok, false);
 
   await saveSettings(db, defaultSettings);
   await db.end();

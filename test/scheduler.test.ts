@@ -29,9 +29,12 @@ test("migration is idempotent and defaults autopilot to paused", { skip: !hasDb 
   const db = createDb(process.env.DATABASE_URL!);
   await migrate(db);
   await migrate(db);
+  const { saveSettings } = await import("../src/db.js");
+  await saveSettings(db, defaultSettings);
   const settings = await getSettings(db);
   assert.equal(settings.enabled, false);
   assert.equal(settings.draftOnlyMode, true);
+  assert.equal(settings.rolloutMode, "draft_only");
   await db.end();
 });
 
