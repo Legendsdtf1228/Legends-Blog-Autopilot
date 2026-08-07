@@ -27,6 +27,7 @@ import {
 } from "./db.js";
 import { AutopilotWorker } from "./scheduler.js";
 import { promotionAllowsAutoPublish } from "./autopilot/rollout.js";
+import { recordReviewedDraftForRollout } from "./autopilot/rolloutProgress.js";
 import { getProductLinks, listBlogs, publishArticle, searchProducts, verifyShopify, safeShopifyErrorMessage } from "./shopify.js";
 import { diagnoseOpenAI, generateArticle } from "./writer.js";
 import { fromGenerated, normalizeArticle, toGenerated, validateArticle } from "./content.js";
@@ -936,6 +937,18 @@ app.post("/articles/:id", async (req: AuthedRequest, res) => {
     merchantEditedFields: [...new Set([...existing.merchantEditedFields, ...editedFields])]
   });
   await recordAudit(db, { actor: actor(req), action: "article_updated", articleId: id, detail: { editedFields } });
+
+  // Merchant marking a draft ready is the review-approval event for rollout progress.
+  if (requireReady && status === "ready") {
+    const rollout = await recordReviewedDraftForRollout(db, id, { actor: actor(req) });
+    const notice = rollout.counted
+      ? `Saved and counted toward rollout (${rollout.consecutiveReviewedDrafts} reviewed drafts).`
+      : rollout.alreadyCounted
+        ? "Saved. Rollout progress unchanged (already counted)."
+        : `Saved. Not counted toward rollout: ${rollout.reasons.join("; ") || "ineligible"}.`;
+    return res.redirect(`/articles/${id}?notice=${encodeURIComponent(notice)}`);
+  }
+
   res.redirect(`/articles/${id}?notice=${encodeURIComponent("Saved.")}`);
 });
 

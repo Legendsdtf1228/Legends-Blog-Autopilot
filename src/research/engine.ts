@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { slugify } from "../content.js";
-import { validateOrReclassify } from "./classification.js";
+import { detectIntentFromKeyword, validateOrReclassify } from "./classification.js";
 import { clusterSignals } from "./cluster.js";
 import {
   classifyDemandEvidence,
@@ -9,6 +10,7 @@ import {
 } from "./outcomes.js";
 import { findClosestOverlap, isRejectedByOverlap, type ExistingArticleRef } from "./overlap.js";
 import { AUDIENCE_LABELS, CONTENT_PILLARS, DEFAULT_RESEARCH_SETTINGS, FORMAT_LABELS, pillarById } from "./pillars.js";
+import { selectProductsForKeyword } from "./productSelection.js";
 import { existingContentProvider } from "./providers/existingContent.js";
 import {
   approvedWebProvider,
@@ -31,11 +33,15 @@ import { demandFromSignals, formatCollectedLabel, growthFromSignals, scoreOpport
 import { isIncoherentSearchIntent, isQuarantinedArticle } from "./semanticIntent.js";
 import { assessTopicSpecificity, buildTopicSpecificOutline, suggestRefinement } from "./specificity.js";
 import type {
+  ArticleFormatId,
+  AudienceId,
   DataCompleteness,
+  KeywordCluster,
   ResearchCycleResult,
   ResearchOpportunity,
   ResearchProviderId,
   ResearchSettings,
+  SearchIntent,
   TopicDecision,
   TopicFreshnessClass
 } from "./types.js";
@@ -125,6 +131,88 @@ function buildTitle(cluster: { primaryKeyword: string; format: string; intent: s
   return `${k}: What ${cluster.subcategory.replace(/\b\w/g, c => c.toUpperCase())} Buyers Should Know`;
 }
 
+function audienceForRefinement(refinementAudience: string, pillarAudiences: AudienceId[]): AudienceId {
+  const lower = refinementAudience.toLowerCase();
+  if (/middle georgia|local|school|team/.test(lower) && pillarAudiences.includes("local_customers")) {
+    return "local_customers";
+  }
+  if (/school|team/.test(lower) && pillarAudiences.includes("schools_teams")) {
+    return "schools_teams";
+  }
+  if (/business|brand/.test(lower) && pillarAudiences.includes("small_business_owners")) {
+    return "small_business_owners";
+  }
+  return pillarAudiences[0]!;
+}
+
+function formatForRefinedIntent(pillarFormats: ArticleFormatId[], intent: SearchIntent): ArticleFormatId {
+  if (intent === "local" || intent === "commercial") {
+    if (pillarFormats.includes("checklist")) return "checklist";
+    if (pillarFormats.includes("how_to")) return "how_to";
+    if (pillarFormats.includes("faq")) return "faq";
+  }
+  return pillarFormats[0]!;
+}
+
+/**
+ * Apply keyword refinement *before* overlap/products/scores/interview so every
+ * dependent field describes the refined candidate, never the discarded seed.
+ */
+export function applyTopicRefinement(cluster: KeywordCluster, usage: UsageRecord[]): KeywordCluster {
+  const next: KeywordCluster = {
+    ...cluster,
+    secondaryKeywords: [...cluster.secondaryKeywords],
+    signals: [...cluster.signals]
+  };
+
+  const reclassSeed = validateOrReclassify(next.primaryKeyword, {
+    pillar: next.pillar,
+    subcategory: next.subcategory
+  });
+  next.pillar = reclassSeed.pillar;
+  next.subcategory = reclassSeed.subcategory;
+
+  const refinement = suggestRefinement(next.primaryKeyword);
+  const shouldRefine =
+    Boolean(refinement) &&
+    (next.primaryKeyword.trim().split(/\s+/).length <= 2 ||
+      isIncoherentSearchIntent(next.primaryKeyword) ||
+      isQuarantinedArticle("", next.primaryKeyword));
+
+  if (shouldRefine && refinement) {
+    next.primaryKeyword = refinement.keyword;
+    next.secondaryKeywords = [...new Set([refinement.keyword, ...next.secondaryKeywords])].slice(0, 8);
+    const again = validateOrReclassify(next.primaryKeyword, {
+      pillar: next.pillar,
+      subcategory: next.subcategory
+    });
+    next.pillar = again.pillar;
+    next.subcategory = again.subcategory;
+    const intentHint = (refinement.intent === "local" || refinement.intent === "commercial"
+      ? refinement.intent
+      : detectIntentFromKeyword(next.primaryKeyword)) as SearchIntent;
+    next.intent = intentHint;
+  } else {
+    next.intent = detectIntentFromKeyword(next.primaryKeyword);
+  }
+
+  const pillarDef = pillarById(next.pillar);
+  if (shouldRefine && refinement) {
+    next.audience = audienceForRefinement(refinement.audience, pillarDef.audiences);
+    next.format = formatForRefinedIntent(pillarDef.formats, next.intent);
+  } else {
+    next.audience = pickRotatedAudience(pillarDef.audiences, usage);
+    next.format = pickRotatedFormat(pillarDef.formats, usage);
+  }
+
+  next.id = createHash("sha1")
+    .update(`${next.pillar}|${next.intent}|${next.primaryKeyword.toLowerCase()}`)
+    .digest("hex")
+    .slice(0, 16);
+
+  return next;
+}
+
 export async function runResearchCycle(args: {
   products: ProviderContext["products"];
   existingArticles: ExistingArticleRef[];
@@ -132,6 +220,8 @@ export async function runResearchCycle(args: {
   settings?: ResearchSettings;
   env?: NodeJS.ProcessEnv;
   now?: Date;
+  /** Extra seed keywords (tests / merchant overrides) merged as seed_catalog signals. */
+  extraKeywords?: string[];
 }): Promise<ResearchCycleResult> {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
   const now = args.now ?? new Date();
@@ -155,6 +245,25 @@ export async function runResearchCycle(args: {
     allSignals.push(...result.signals);
   }
 
+  for (const keyword of args.extraKeywords || []) {
+    allSignals.push({
+      provider: "seed_catalog" as const,
+      collectedAt: now.toISOString(),
+      dataPeriodStart: null,
+      dataPeriodEnd: null,
+      geographicRegion: settings.region,
+      keyword,
+      topic: keyword,
+      volume: null,
+      relativeInterest: null,
+      growth: null,
+      competition: null,
+      sourceUrl: null,
+      completeness: "unavailable" as const,
+      notes: "Extra seed keyword for discovery/refinement."
+    });
+  }
+
   const missingIds = missingProviders.map(m => m.provider);
   const clusters = clusterSignals(allSignals, missingIds);
   const opportunities: ResearchOpportunity[] = [];
@@ -163,20 +272,17 @@ export async function runResearchCycle(args: {
   const maxVolume = volumePool.length ? Math.max(...volumePool) : null;
   const maxInterest = interestPool.length ? Math.max(...interestPool) : null;
 
-  for (const cluster of clusters) {
+  for (const rawCluster of clusters) {
+    if (!fitsLegends(rawCluster.pillar, rawCluster.primaryKeyword)) continue;
+
+    // 1) Refine first when the seed is broad/incoherent — then re-evaluate everything
+    // against the refined candidate so links/scores/overlap/interview never linger.
+    const cluster = applyTopicRefinement(rawCluster, args.usage);
     if (!fitsLegends(cluster.pillar, cluster.primaryKeyword)) continue;
 
-    const reclass = validateOrReclassify(cluster.primaryKeyword, {
-      pillar: cluster.pillar,
-      subcategory: cluster.subcategory
-    });
-    cluster.pillar = reclass.pillar;
-    cluster.subcategory = reclass.subcategory;
-
     const pillarDef = pillarById(cluster.pillar);
-    cluster.audience = pickRotatedAudience(pillarDef.audiences, args.usage);
-    cluster.format = pickRotatedFormat(pillarDef.formats, args.usage);
 
+    // 2) Dependent evaluation — all computed from the (possibly refined) cluster only.
     const closest = findClosestOverlap(cluster, args.existingArticles);
     const overlapRejected = isRejectedByOverlap(closest, settings.overlapRejectThreshold);
 
@@ -195,6 +301,31 @@ export async function runResearchCycle(args: {
     const business = Math.max(0, Math.min(1,
       businessRelevance(cluster.primaryKeyword, cluster.pillar, args.products) * (0.7 + 0.3 * rotation) + dtfBias
     ));
+
+    // Prefer refinement metadata for either the raw seed or the (already refined) keyword.
+    const refinementMeta =
+      suggestRefinement(rawCluster.primaryKeyword) || suggestRefinement(cluster.primaryKeyword);
+    const proposedTitle = refinementMeta?.title || buildTitle(cluster);
+    const readerQuestion = refinementMeta?.readerQuestion
+      || `What should ${AUDIENCE_LABELS[cluster.audience].toLowerCase()} know about ${cluster.primaryKeyword}?`;
+    const audienceLabel = refinementMeta?.audience || AUDIENCE_LABELS[cluster.audience];
+    const proposedOutline = buildTopicSpecificOutline(cluster, readerQuestion);
+
+    const productsToFeature = selectProductsForKeyword({
+      products: args.products,
+      primaryKeyword: cluster.primaryKeyword,
+      secondaryKeywords: cluster.secondaryKeywords,
+      title: proposedTitle,
+      readerQuestion,
+      nowIso: now.toISOString(),
+      limit: 3
+    });
+
+    const requiresInterview = settings.requireInterviewForFirstPerson &&
+      (cluster.format === "first_person_story" ||
+        cluster.pillar === "honest_entrepreneurship" ||
+        cluster.pillar === "legends_story");
+
     const scores = scoreOpportunity({
       signals: demandSignals,
       businessRelevance: business,
@@ -210,57 +341,6 @@ export async function runResearchCycle(args: {
       maxInterest
     });
 
-    const productsToFeature = args.products
-      .filter(p => {
-        const t = p.title.toLowerCase();
-        return cluster.secondaryKeywords.concat(cluster.primaryKeyword).some(k => t.includes(k.toLowerCase().split(" ")[0] || ""));
-      })
-      .slice(0, 3)
-      .map(p => ({
-        id: (p as { id?: string }).id,
-        title: p.title,
-        handle: p.handle,
-        url: p.url,
-        description: p.description || "",
-        productType: (p as { productType?: string }).productType,
-        options: (p as { options?: string[] }).options || [],
-        retrievedAt: (p as { retrievedAt?: string }).retrievedAt || now.toISOString()
-      }));
-
-    const requiresInterview = settings.requireInterviewForFirstPerson &&
-      (cluster.format === "first_person_story" || cluster.pillar === "honest_entrepreneurship" || cluster.pillar === "legends_story");
-
-    const refinement = suggestRefinement(cluster.primaryKeyword);
-    // Auto-refine broad seeds and incoherent search intents before generation.
-    const shouldRefine =
-      Boolean(refinement) &&
-      (cluster.primaryKeyword.trim().split(/\s+/).length <= 2 ||
-        isIncoherentSearchIntent(cluster.primaryKeyword) ||
-        isQuarantinedArticle("", cluster.primaryKeyword));
-    if (shouldRefine && refinement) {
-      cluster.primaryKeyword = refinement.keyword;
-      cluster.secondaryKeywords = [...new Set([cluster.primaryKeyword, ...cluster.secondaryKeywords])].slice(0, 8);
-      const again = validateOrReclassify(cluster.primaryKeyword, {
-        pillar: cluster.pillar,
-        subcategory: cluster.subcategory
-      });
-      cluster.pillar = again.pillar;
-      cluster.subcategory = again.subcategory;
-  // Prefer commercial / local formats for printer-selection refinements.
-      if (refinement.intent === "local" || refinement.intent === "commercial") {
-        cluster.intent = refinement.intent === "local" ? "local" : "commercial";
-        if (cluster.format === "first_person_story") {
-          cluster.format = "checklist";
-        }
-      }
-    }
-
-    const proposedTitle = refinement && shouldRefine ? refinement.title : buildTitle(cluster);
-    const readerQuestion = refinement?.readerQuestion
-      || `What should ${AUDIENCE_LABELS[cluster.audience].toLowerCase()} know about ${cluster.primaryKeyword}?`;
-    const proposedOutline = buildTopicSpecificOutline(cluster, readerQuestion);
-    const audienceLabel = refinement?.audience || AUDIENCE_LABELS[cluster.audience];
-
     const specificity = assessTopicSpecificity({
       primaryKeyword: cluster.primaryKeyword,
       proposedTitle,
@@ -269,7 +349,6 @@ export async function runResearchCycle(args: {
       whyDistinct: closest ? `Different angle from “${closest.title}”` : "No close match"
     });
 
-    // If semantic alignment still fails after attempted refinement, reject before generation.
     const semanticRejected =
       isIncoherentSearchIntent(cluster.primaryKeyword) ||
       isQuarantinedArticle(proposedTitle, cluster.primaryKeyword) ||
@@ -305,7 +384,6 @@ export async function runResearchCycle(args: {
       )
     });
 
-    // Skip rejected broad/overlap/semantic topics from the candidate list entirely
     if (outcome.decision === "REJECTED") continue;
 
     const failedGates = [
@@ -314,7 +392,6 @@ export async function runResearchCycle(args: {
     ];
 
     const dataLabel = formatCollectedLabel(now, completeness);
-    // Never claim popularity without verified metrics
     const safeDemandLabel = demandClass === "verified_demand"
       ? `${dataLabel} Verified demand metrics available.`
       : `${dataLabel} No verified volume/growth metrics; treated as ${demandClass.replace(/_/g, " ")}.`;

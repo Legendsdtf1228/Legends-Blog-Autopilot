@@ -37,7 +37,11 @@ import {
   type ResearchCycleResult,
   type ResearchOpportunity
 } from "../research/index.js";
-import { countsTowardRolloutDraft, quarantineFailedRolloutArticles } from "../research/quarantine.js";
+import {
+  countsTowardRolloutDraft,
+  quarantineFailedRolloutArticles,
+  quarantineFailedRolloutOpportunities
+} from "../research/quarantine.js";
 import { getProductLinks, publishArticle } from "../shopify.js";
 import type { GeneratedArticle, ProductLink, Settings } from "../types.js";
 import { generateArticle as defaultGenerateArticle } from "../writer.js";
@@ -460,6 +464,7 @@ export async function executeScheduledResearchCycle(args: {
 
   try {
     await quarantineFailedRolloutArticles(args.db);
+    await quarantineFailedRolloutOpportunities(args.db);
   } catch {
     /* non-fatal — gates still reject at generation/quality time */
   }

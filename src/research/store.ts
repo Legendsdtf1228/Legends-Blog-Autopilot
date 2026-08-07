@@ -1,4 +1,5 @@
 import type { Db } from "../db.js";
+import { isQuarantinedOpportunity } from "./quarantine.js";
 import type {
   ArticleBrief,
   EvidenceReport,
@@ -113,6 +114,16 @@ export async function reserveOpportunity(
   workerId: string,
   ttlSeconds = 900
 ): Promise<ResearchOpportunity | null> {
+  const existing = await getOpportunity(db, opportunityId);
+  if (!existing) return null;
+  if (
+    existing.status === "rejected" ||
+    existing.decision === "REJECTED" ||
+    isQuarantinedOpportunity(existing)
+  ) {
+    return null;
+  }
+
   const { rows } = await db.query<{ payload: ResearchOpportunity; status: string; reserved_by: string | null; reserved_until: string | null }>(
     `UPDATE research_opportunities
      SET status='reserved',
@@ -120,15 +131,21 @@ export async function reserveOpportunity(
          reserved_until=now() + ($3 || ' seconds')::interval,
          updated_at=now()
      WHERE id=$1
+       AND status NOT IN ('rejected','used','approved')
        AND (
          status='suggested'
          OR (status='reserved' AND (reserved_until IS NULL OR reserved_until < now()))
          OR (status='reserved' AND reserved_by=$2)
        )
+       AND COALESCE(payload->>'decision','') <> 'REJECTED'
      RETURNING payload, status, reserved_by, reserved_until`,
     [opportunityId, workerId, String(ttlSeconds)]
   );
   if (!rows[0]) return null;
+  if (isQuarantinedOpportunity(rows[0].payload)) {
+    await markOpportunityStatus(db, opportunityId, "rejected");
+    return null;
+  }
   return {
     ...rows[0].payload,
     status: "reserved",

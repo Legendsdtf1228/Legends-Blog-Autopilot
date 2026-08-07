@@ -55,7 +55,11 @@ export function suggestRefinement(keyword: string): {
       readerQuestion: "Is DTF or vinyl the better decoration method for small apparel runs?"
     };
   }
-  if (isIncoherentSearchIntent(n) || /\blocal small-?business stories\b/i.test(n)) {
+  if (
+    isIncoherentSearchIntent(n) ||
+    /\blocal small-?business stories\b/i.test(n) ||
+    /\bhow to choose a local custom shirt printer\b/i.test(n)
+  ) {
     return suggestLocalPrinterRefinement();
   }
   return null;

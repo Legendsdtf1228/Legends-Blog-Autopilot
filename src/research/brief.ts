@@ -1,6 +1,9 @@
+import { detectIntentFromKeyword, validateOrReclassify } from "./classification.js";
 import { clusterSignals } from "./cluster.js";
 import { findClosestOverlap, isRejectedByOverlap, type ExistingArticleRef } from "./overlap.js";
-import { AUDIENCE_LABELS, DEFAULT_RESEARCH_SETTINGS } from "./pillars.js";
+import { AUDIENCE_LABELS, DEFAULT_RESEARCH_SETTINGS, pillarById } from "./pillars.js";
+import { selectProductsForKeyword } from "./productSelection.js";
+import { isIncoherentSearchIntent } from "./semanticIntent.js";
 import { assessTopicSpecificity, buildTopicSpecificOutline, suggestRefinement } from "./specificity.js";
 import { buildSeoDeliverables } from "./seo.js";
 import type {
@@ -90,7 +93,19 @@ export function buildArticleBrief(
   }
 ): ArticleBrief {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
-  const products = (args.products?.length ? args.products : opportunity.productsToFeature).map(p => ({
+  // Prefer opportunity-selected products (already intent-filtered). Never reintroduce
+  // the full catalog, which can revive unrelated links from a discarded seed framing.
+  const sourceProducts = opportunity.productsToFeature.length
+    ? opportunity.productsToFeature
+    : selectProductsForKeyword({
+        products: args.products || [],
+        primaryKeyword: opportunity.cluster.primaryKeyword,
+        secondaryKeywords: opportunity.cluster.secondaryKeywords,
+        title: opportunity.proposedTitle,
+        readerQuestion: opportunity.readerQuestion,
+        limit: 3
+      });
+  const products = sourceProducts.map(p => ({
     ...p,
     description: p.description ?? ""
   }));
@@ -134,7 +149,7 @@ export function buildArticleBrief(
     proposedHandle: opportunity.proposedHandle,
     proposedOutline: opportunity.proposedOutline,
     productsToFeature: products,
-    internalLinks: opportunity.internalLinks,
+    internalLinks: products.map(p => p.url).length ? products.map(p => p.url) : opportunity.internalLinks,
     externalSources: opportunity.externalSources,
     freshnessClass: opportunity.freshnessClass,
     requiresInterview: opportunity.requiresInterview,
@@ -198,15 +213,32 @@ export function evaluateCustomTopic(topic: string, args: {
   const settings = args.settings ?? DEFAULT_RESEARCH_SETTINGS;
   let cluster = clusterFromCustomTopic(topic);
   const refinement = suggestRefinement(topic);
-  if (
-    refinement &&
+  const shouldRefine =
+    Boolean(refinement) &&
     (topic.trim().split(/\s+/).length <= 2 ||
       /\blocal small-?business stories\b/i.test(topic) ||
-      /\bstories\b/i.test(topic))
-  ) {
+      /\bstories\b/i.test(topic) ||
+      isIncoherentSearchIntent(topic));
+  if (shouldRefine && refinement) {
+    // Rebuild cluster from refined keyword so pillar/intent/format are not stale.
     cluster = clusterFromCustomTopic(refinement.keyword);
+    const classified = validateOrReclassify(refinement.keyword, {
+      pillar: cluster.pillar,
+      subcategory: cluster.subcategory
+    });
+    cluster.pillar = classified.pillar;
+    cluster.subcategory = classified.subcategory;
+    cluster.intent =
+      refinement.intent === "local" || refinement.intent === "commercial"
+        ? refinement.intent
+        : detectIntentFromKeyword(refinement.keyword);
+    const pillarDef = pillarById(cluster.pillar);
+    if (pillarDef.formats.includes("checklist")) cluster.format = "checklist";
+    else if (pillarDef.formats.includes("how_to")) cluster.format = "how_to";
+    if (pillarDef.audiences.includes("local_customers")) cluster.audience = "local_customers";
   }
 
+  // Overlap / uniqueness must use the refined cluster only.
   const overlap = findClosestOverlap(cluster, args.existingArticles);
   if (isRejectedByOverlap(overlap, settings.overlapRejectThreshold)) {
     return {
@@ -217,24 +249,24 @@ export function evaluateCustomTopic(topic: string, args: {
     };
   }
 
-  const readerQuestion = refinement?.readerQuestion
-    || `What should readers know about ${cluster.primaryKeyword}?`;
-  const proposedTitle = refinement?.title
-    || `${cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase())}: What Buyers Should Know`;
+  const readerQuestion = shouldRefine && refinement?.readerQuestion
+    ? refinement.readerQuestion
+    : `What should readers know about ${cluster.primaryKeyword}?`;
+  const proposedTitle = shouldRefine && refinement?.title
+    ? refinement.title
+    : `${cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase())}: What Buyers Should Know`;
   const outline = buildTopicSpecificOutline(cluster, readerQuestion);
   const specificity = assessTopicSpecificity({
     primaryKeyword: cluster.primaryKeyword,
     proposedTitle,
     outline,
-    audienceLabel: refinement?.audience || AUDIENCE_LABELS[cluster.audience],
-    whyDistinct: "Merchant-entered topic",
-    // Pass through semantic fields when available via assessTopicSpecificity only
+    audienceLabel: (shouldRefine && refinement?.audience) || AUDIENCE_LABELS[cluster.audience],
+    whyDistinct: "Merchant-entered topic"
   });
 
-  // Unrefined incoherent story keywords must not generate.
   const stillIncoherent =
     /\blocal small-?business stories\b/i.test(cluster.primaryKeyword) ||
-    (/\bstories\b/i.test(cluster.primaryKeyword) && !refinement);
+    (/\bstories\b/i.test(cluster.primaryKeyword) && !shouldRefine);
 
   if (stillIncoherent || specificity.score < settings.minTopicSpecificity || !specificity.ok) {
     return {
@@ -248,6 +280,20 @@ export function evaluateCustomTopic(topic: string, args: {
     };
   }
 
+  const productsToFeature = selectProductsForKeyword({
+    products: args.products || [],
+    primaryKeyword: cluster.primaryKeyword,
+    secondaryKeywords: cluster.secondaryKeywords,
+    title: proposedTitle,
+    readerQuestion,
+    limit: 3
+  });
+
+  const requiresInterview = settings.requireInterviewForFirstPerson &&
+    (cluster.format === "first_person_story" ||
+      cluster.pillar === "honest_entrepreneurship" ||
+      cluster.pillar === "legends_story");
+
   const opportunityLike: ResearchOpportunity = {
     id: `custom:${slug(cluster.primaryKeyword)}`,
     cluster,
@@ -255,9 +301,9 @@ export function evaluateCustomTopic(topic: string, args: {
       demandScore: 0,
       growthScore: 0,
       businessRelevance: 0.7,
-      conversionIntent: 0.5,
+      conversionIntent: cluster.intent === "local" || cluster.intent === "commercial" ? 0.7 : 0.5,
       rankingOpportunity: 0.4,
-      localRelevance: 0.5,
+      localRelevance: /\blocal|warner|georgia\b/i.test(cluster.primaryKeyword + proposedTitle) ? 0.9 : 0.5,
       freshnessScore: 0.5,
       contentGapScore: overlap ? 1 - overlap.score : 0.7,
       overlapPenalty: overlap?.score ?? 0,
@@ -274,11 +320,8 @@ export function evaluateCustomTopic(topic: string, args: {
       ? `Related to “${overlap.title}” but merchant asserts a distinct angle.`
       : "Merchant-entered topic with no close existing match.",
     whyFitsLegends: "Merchant-selected topic pending review.",
-    requiresInterview: settings.requireInterviewForFirstPerson &&
-      (cluster.format === "first_person_story" ||
-        cluster.pillar === "honest_entrepreneurship" ||
-        cluster.pillar === "legends_story"),
-    productsToFeature: (args.products || []).slice(0, 3),
+    requiresInterview,
+    productsToFeature,
     proposedTitle,
     proposedH1: proposedTitle,
     proposedHandle: slug(proposedTitle),
@@ -290,7 +333,7 @@ export function evaluateCustomTopic(topic: string, args: {
     decision: "DRAFT_ONLY",
     decisionReasons: ["Merchant-entered topic; draft-only until gates pass."],
     failedGates: [],
-    internalLinks: (args.products || []).slice(0, 3).map(p => p.url),
+    internalLinks: productsToFeature.map(p => p.url),
     externalSources: [],
     status: "suggested"
   };
