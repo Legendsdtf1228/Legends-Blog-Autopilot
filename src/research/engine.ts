@@ -507,18 +507,19 @@ export async function runResearchCycle(args: {
     });
   }
 
-  // Autonomous fallback: prefer AUTO_ELIGIBLE. Merchant-input never blocks the schedule.
-  // DRAFT_ONLY is kept for visibility/review but is not the preferred autonomous pick.
+  // Autonomous schedule selection: AUTO_ELIGIBLE only for generation.
+  // DRAFT_ONLY stays visible in opportunities but never fills the schedule.
+  // Merchant-input may be selected solely to create an interview packet.
   const rank = (d: TopicDecision) =>
-    d === "AUTO_ELIGIBLE" ? 4 : d === "DRAFT_ONLY" ? 2 : d === "NEEDS_MERCHANT_INPUT" ? 1 : 0;
+    d === "AUTO_ELIGIBLE" ? 4 : d === "NEEDS_MERCHANT_INPUT" ? 2 : d === "DRAFT_ONLY" ? 1 : 0;
   opportunities.sort((a, b) =>
     rank(b.decision) - rank(a.decision) || b.scores.opportunityScore - a.scores.opportunityScore
   );
 
   const auto = opportunities.find(o => o.decision === "AUTO_ELIGIBLE");
-  const draft = opportunities.find(o => o.decision === "DRAFT_ONLY");
   const merchant = opportunities.find(o => o.decision === "NEEDS_MERCHANT_INPUT");
-  const selected = auto ?? draft ?? merchant ?? null;
+  const draft = opportunities.find(o => o.decision === "DRAFT_ONLY");
+  const selected = auto ?? merchant ?? null;
   if (selected && merchant && selected.id !== merchant.id) {
     merchant.editorialDecision = {
       ...(merchant.editorialDecision || {
@@ -531,6 +532,21 @@ export async function runResearchCycle(args: {
       reasons: [
         ...(merchant.editorialDecision?.reasons || merchant.decisionReasons),
         `Skipped for schedule — selected “${selected.proposedTitle}” instead.`
+      ]
+    };
+  }
+  if (auto && draft && draft.id !== auto.id) {
+    draft.editorialDecision = {
+      ...(draft.editorialDecision || {
+        originalKeyword: draft.cluster.primaryKeyword,
+        originalTitle: draft.proposedTitle,
+        missingEvidence: [],
+        reasons: draft.decisionReasons
+      }),
+      replacedByOtherTopic: true,
+      reasons: [
+        ...(draft.editorialDecision?.reasons || draft.decisionReasons),
+        `DRAFT_ONLY not auto-generated — selected AUTO_ELIGIBLE “${auto.proposedTitle}” instead.`
       ]
     };
   }
@@ -548,7 +564,11 @@ export async function runResearchCycle(args: {
     cycleDecision,
     cycleDecisionReasons: selected
       ? selected.decisionReasons
-      : ["No topic met content-promise, evidence, depth, and safety requirements. Safe skip — do not publish weak filler."]
+      : [
+          draft
+            ? "Only DRAFT_ONLY topics remain; refusing to auto-generate filler. Safe skip."
+            : "No topic met content-promise, evidence, depth, and safety requirements. Safe skip — do not publish weak filler."
+        ]
   };
 }
 

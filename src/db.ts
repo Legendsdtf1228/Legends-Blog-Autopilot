@@ -185,6 +185,21 @@ export async function migrate(db: Db): Promise<void> {
     )`);
     await client.query("CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at DESC)");
     await client.query("CREATE INDEX IF NOT EXISTS audit_events_article_idx ON audit_events(article_id, created_at DESC)");
+    // One rollout_draft_counted audit event per article (concurrency / idempotency)
+    await client.query(`
+      DELETE FROM audit_events a
+      USING audit_events b
+      WHERE a.action = 'rollout_draft_counted'
+        AND b.action = 'rollout_draft_counted'
+        AND a.article_id IS NOT NULL
+        AND a.article_id = b.article_id
+        AND a.id > b.id
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS audit_events_rollout_draft_counted_article_uidx
+      ON audit_events(article_id)
+      WHERE action = 'rollout_draft_counted' AND article_id IS NOT NULL
+    `);
 
     await client.query(`CREATE TABLE IF NOT EXISTS sessions (
       id text PRIMARY KEY,
@@ -381,7 +396,8 @@ export async function migrate(db: Db): Promise<void> {
     await client.query(
       `INSERT INTO schema_migrations(id) VALUES
         ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research'),
-        ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim')
+        ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim'),
+        ('007_rollout_draft_counted_unique')
        ON CONFLICT DO NOTHING`
     );
 

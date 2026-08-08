@@ -520,44 +520,59 @@ export async function executeScheduledResearchCycle(args: {
       };
     }
 
-    // Autonomous fallback: never let merchant-input topics block the schedule when
-    // another AUTO_ELIGIBLE opportunity can satisfy cadence (prefer AUTO over DRAFT_ONLY filler).
-    let selectedOpp = result.selected;
-    if (selectedOpp.decision === "NEEDS_MERCHANT_INPUT") {
-      const replacement = result.opportunities.find(o =>
-        o.id !== selectedOpp.id &&
-        o.decision === "AUTO_ELIGIBLE" &&
-        o.status !== "rejected"
-      ) || result.opportunities.find(o =>
-        o.id !== selectedOpp.id &&
-        o.decision === "DRAFT_ONLY" &&
-        o.status !== "rejected"
+    // Autonomous schedule: generate only AUTO_ELIGIBLE. Never fall back to DRAFT_ONLY filler.
+    // Merchant-input may be reserved solely to create an interview packet (no generation).
+    const autoOpp = result.opportunities.find(o =>
+      o.decision === "AUTO_ELIGIBLE" && o.status !== "rejected"
+    ) || (result.selected?.decision === "AUTO_ELIGIBLE" ? result.selected : null);
+
+    let selectedOpp = autoOpp;
+    if (!selectedOpp && result.selected?.decision === "NEEDS_MERCHANT_INPUT") {
+      selectedOpp = result.selected;
+    } else if (!selectedOpp) {
+      const merchant = result.opportunities.find(o =>
+        o.decision === "NEEDS_MERCHANT_INPUT" && o.status !== "rejected"
       );
-      if (replacement) {
-        selectedOpp = {
-          ...replacement,
-          editorialDecision: {
-            ...(replacement.editorialDecision || {}),
-            replacedByOtherTopic: false,
-            reasons: [
-              ...(replacement.decisionReasons || []),
-              `Selected instead of merchant-input topic “${result.selected.proposedTitle}”.`
-            ]
-          }
-        };
-        await recordAudit(args.db, {
-          actor: args.actor || "scheduler",
-          action: "research_cycle_skipped_merchant_input_topic",
-          detail: {
-            slotKey: args.slotKey,
-            skippedOpportunityId: result.selected.id,
-            skippedTitle: result.selected.proposedTitle,
-            selectedOpportunityId: selectedOpp.id,
-            selectedTitle: selectedOpp.proposedTitle,
-            missingEvidence: result.selected.editorialDecision?.missingEvidence || []
-          }
-        });
-      }
+      selectedOpp = merchant || null;
+    }
+
+    if (result.selected && selectedOpp && result.selected.id !== selectedOpp.id) {
+      await recordAudit(args.db, {
+        actor: args.actor || "scheduler",
+        action: "research_cycle_skipped_non_auto_topic",
+        detail: {
+          slotKey: args.slotKey,
+          skippedOpportunityId: result.selected.id,
+          skippedTitle: result.selected.proposedTitle,
+          skippedDecision: result.selected.decision,
+          selectedOpportunityId: selectedOpp.id,
+          selectedTitle: selectedOpp.proposedTitle,
+          selectedDecision: selectedOpp.decision
+        }
+      });
+    }
+
+    if (!selectedOpp) {
+      const reasons = [
+        "No AUTO_ELIGIBLE topic available for autonomous generation.",
+        "DRAFT_ONLY topics are not auto-generated (refuse schedule filler)."
+      ];
+      await completeResearchSlot(args.db, runId, {
+        decision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
+        collectedAt: result.collectedAt
+      });
+      await recordAudit(args.db, {
+        actor: args.actor || "scheduler",
+        action: "research_cycle_skipped",
+        detail: { slotKey: args.slotKey, reasons, mode, runId, refusedDraftOnlyFiller: true }
+      });
+      return {
+        ok: true,
+        cycleDecision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
+        mode
+      };
     }
 
     opportunityId = selectedOpp.id;
@@ -620,6 +635,34 @@ export async function executeScheduledResearchCycle(args: {
         ok: true,
         cycleDecision: "NEEDS_MERCHANT_INPUT",
         reasons: ["Merchant interview required; brief saved without generation."],
+        briefId,
+        opportunityId,
+        mode
+      };
+    }
+
+    // Hard gate: automatic generation requires AUTO_ELIGIBLE only.
+    if (brief.decision !== "AUTO_ELIGIBLE" || reserved.decision !== "AUTO_ELIGIBLE") {
+      const reasons = [
+        `Refusing automatic generation for decision ${brief.decision} (AUTO_ELIGIBLE required).`,
+        "DRAFT_ONLY and other non-auto decisions are not schedule filler."
+      ];
+      await completeResearchSlot(args.db, runId, {
+        decision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
+        opportunityId,
+        briefId,
+        collectedAt: result.collectedAt
+      });
+      await recordAudit(args.db, {
+        actor: args.actor || "scheduler",
+        action: "research_cycle_refused_non_auto_generation",
+        detail: { slotKey: args.slotKey, opportunityId, briefId, decision: brief.decision, mode }
+      });
+      return {
+        ok: true,
+        cycleDecision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
         briefId,
         opportunityId,
         mode
