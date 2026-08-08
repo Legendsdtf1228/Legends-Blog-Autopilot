@@ -525,17 +525,47 @@ export function researchPage(args: {
     ? `<div class="notice">${args.cycle.missingProviders.map(m => `<div><strong>${esc(m.provider)}</strong>: ${esc(m.reason)}</div>`).join("")}</div>`
     : `<p class="muted">No missing providers recorded yet.</p>`;
 
+  const failureSummary = (() => {
+    const counts = new Map<string, number>();
+    for (const o of args.opportunities) {
+      if (o.decision !== "REJECTED" && o.decision !== "NEEDS_MERCHANT_INPUT" && o.decision !== "DRAFT_ONLY") {
+        continue;
+      }
+      const missing = o.editorialDecision?.missingEvidence || [];
+      if (missing.length) {
+        for (const m of missing) {
+          counts.set(m, (counts.get(m) || 0) + 1);
+        }
+      } else {
+        const key = `${o.decision}:${o.contentPromiseClass || "unclassified"}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    if (!counts.size) return "";
+    const items = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([k, n]) => `<li>${esc(k)}: ${n}</li>`)
+      .join("");
+    return `<section class="card"><h3>Common editorial failure classes</h3><ul>${items}</ul></section>`;
+  })();
+
   const rows = args.opportunities.slice(0, 25).map(o => `
     <tr>
-      <td><a href="/research/opportunities/${esc(o.id)}">${esc(o.proposedTitle)}</a></td>
+      <td><a href="/research/opportunities/${esc(o.id)}">${esc(o.proposedTitle)}</a>
+        <div class="muted">${esc(o.editorialDecision?.originalKeyword && o.editorialDecision.originalKeyword !== o.cluster.primaryKeyword
+          ? `Refined from: ${o.editorialDecision.originalKeyword}`
+          : "")}</div>
+        <div class="muted">${esc((o.decisionReasons || []).slice(0, 2).join(" · "))}</div>
+      </td>
       <td>${esc(o.cluster.pillar)}</td>
       <td>${esc(o.cluster.primaryKeyword)}</td>
-      <td>${esc(AUDIENCE_LABELS[o.cluster.audience])}</td>
-      <td>${esc(FORMAT_LABELS[o.cluster.format])}</td>
+      <td>${esc(o.contentPromiseClass || "—")}</td>
+      <td>${esc((o.editorialDecision?.missingEvidence || []).join("; ") || "—")}</td>
       <td>${esc(o.scores.opportunityScore.toFixed(3))}</td>
-      <td>${esc(o.decision || "—")}</td>
+      <td>${esc(o.decision || "—")}${o.editorialDecision?.replacedByOtherTopic ? " (replaced)" : ""}</td>
       <td>${esc(o.status)}</td>
-      <td>${esc(o.dataCollectedLabel)}</td>
+      <td>${o.editorialDecision?.merchantInputWouldUnlock ? "Yes" : "No"}</td>
     </tr>`).join("") || `<tr><td colspan="9" class="muted">No opportunities yet. Run a research cycle.</td></tr>`;
 
   return `
@@ -553,6 +583,7 @@ export function researchPage(args: {
     ${args.cycle ? `<p><strong>${esc(args.cycle.signalCount)}</strong> signals · collected ${esc(new Date(args.cycle.collectedAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>` : ""}
     ${missing}
   </section>
+  ${failureSummary}
   <section class="card">
     <h3>Approved content pillars</h3>
     <ul>${args.pillars.map(p => `<li><strong>${esc(p.label)}</strong> — ${esc(p.subcategories.slice(0, 3).join(", "))}</li>`).join("")}</ul>
@@ -562,7 +593,7 @@ export function researchPage(args: {
     <h3>Ranked opportunities</h3>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Topic</th><th>Pillar</th><th>Keyword</th><th>Audience</th><th>Format</th><th>Score</th><th>Decision</th><th>Status</th><th>Data freshness</th></tr></thead>
+        <thead><tr><th>Topic</th><th>Pillar</th><th>Keyword</th><th>Promise</th><th>Missing evidence</th><th>Score</th><th>Decision</th><th>Status</th><th>Merchant input?</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -639,6 +670,12 @@ export function briefReviewPage(args: {
       <dt>Search intent</dt><dd>${esc(b.searchIntent)}</dd>
       <dt>Decision</dt><dd>${esc(b.decision || "DRAFT_ONLY")} ${b.automaticPublishingEligible ? "(auto-eligible)" : "(not auto-eligible)"}</dd>
       <dt>Decision reasons</dt><dd>${esc((b.decisionReasons || []).join(" · ") || "—")}</dd>
+      <dt>Original topic</dt><dd>${esc(b.editorialDecision?.originalKeyword || b.primaryKeyword)}</dd>
+      <dt>Refined topic</dt><dd>${esc(b.editorialDecision?.refinedKeyword || "—")}</dd>
+      <dt>Content promise class</dt><dd>${esc(b.contentPromiseClass || b.editorialDecision?.contentPromiseClass || "—")}</dd>
+      <dt>Missing evidence</dt><dd>${esc((b.editorialDecision?.missingEvidence || []).join("; ") || "—")}</dd>
+      <dt>Merchant input would unlock</dt><dd>${b.editorialDecision?.merchantInputWouldUnlock ? "Yes" : "No"}</dd>
+      <dt>Evidence confidence</dt><dd>${esc(String(b.evidenceConfidence ?? "—"))}</dd>
       <dt>Topic specificity / uniqueness</dt><dd>${esc(String(b.topicSpecificity ?? "—"))} / ${esc(String(b.uniqueness ?? "—"))}</dd>
       <dt>Demand class</dt><dd>${esc(b.demandClass || "editorial_business_opportunity")}</dd>
       <dt>Geographic target</dt><dd>${esc(b.geographicTarget)}</dd>

@@ -56,17 +56,22 @@ export function decideTopicOutcome(args: {
   /** Pre-generation semantic misalignment (keyword/title/audience/intent). */
   semanticRejected?: boolean;
   semanticReasons?: string[];
+  /** Editorial-controls decision (content promise / evidence / depth). */
+  editorialDecision?: TopicDecision;
+  editorialReasons?: string[];
 }): { decision: TopicDecision; reasons: string[] } {
   const t = args.thresholds ?? DEFAULT_AUTO_THRESHOLDS;
   const reasons: string[] = [];
   const s = args.scorecard;
 
-  if (args.semanticRejected) {
+  if (args.editorialDecision === "REJECTED" || args.semanticRejected) {
     return {
       decision: "REJECTED",
-      reasons: args.semanticReasons?.length
-        ? args.semanticReasons
-        : ["Failed semantic alignment among keyword, reader, title, angle, and conversion path."]
+      reasons: (args.editorialReasons?.length && args.editorialDecision === "REJECTED"
+        ? args.editorialReasons
+        : args.semanticReasons?.length
+          ? args.semanticReasons
+          : ["Failed content-promise / evidence / depth gates."])
     };
   }
   if (args.overlapRejected || args.classificationInvalid) {
@@ -76,10 +81,15 @@ export function decideTopicOutcome(args: {
     reasons.push(`Topic specificity ${s.topicSpecificity} below threshold ${t.topicSpecificity}.`);
     return { decision: "REJECTED", reasons };
   }
-  if (args.requiresInterview && !args.interviewComplete) {
+  if (
+    args.editorialDecision === "NEEDS_MERCHANT_INPUT" ||
+    (args.requiresInterview && !args.interviewComplete)
+  ) {
     return {
       decision: "NEEDS_MERCHANT_INPUT",
-      reasons: ["First-person / story topic requires approved merchant interview answers."]
+      reasons: args.editorialReasons?.length
+        ? args.editorialReasons
+        : ["Firsthand / merchant-knowledge topic requires approved input before generation."]
     };
   }
   if (s.criticalViolations > 0 || s.majorViolations > 0) {

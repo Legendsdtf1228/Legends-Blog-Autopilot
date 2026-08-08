@@ -89,6 +89,7 @@ import {
   saveEvidenceReport,
   saveInterview,
   saveResearchCycle,
+  storeApprovedInterviewKnowledge,
   updateBrief
 } from "./research/index.js";
 
@@ -552,6 +553,12 @@ app.post("/research/briefs/:id/interview", async (req: AuthedRequest, res) => {
     brief.factSheet = { ...brief.factSheet, businessFacts: facts };
     brief.status = "approved";
     await updateBrief(db, id, brief);
+    await storeApprovedInterviewKnowledge(db, {
+      interview,
+      topicClass: brief.contentPromiseClass || brief.format || "firsthand_experience",
+      briefId: id,
+      approvedBy: actor(req)
+    });
   }
   res.redirect(`/research/briefs/${id}?notice=${encodeURIComponent(interview.completed ? "Interview saved. You can approve and generate." : "Interview saved. Complete every answer (8+ chars) to unlock generation.")}`);
 });

@@ -1,11 +1,12 @@
 import { ENTREPRENEURSHIP_INTERVIEW_QUESTIONS } from "./pillars.js";
 import type { MerchantInterview } from "./types.js";
 
-export function createInterviewDraft(briefId: number): MerchantInterview {
+export function createInterviewDraft(briefId: number, questions?: string[]): MerchantInterview {
+  const list = (questions?.length ? questions : ENTREPRENEURSHIP_INTERVIEW_QUESTIONS).slice(0, 10);
   return {
     briefId,
     completed: false,
-    questions: ENTREPRENEURSHIP_INTERVIEW_QUESTIONS.slice(0, 10).map((question, index) => ({
+    questions: list.map((question, index) => ({
       id: `q${index + 1}`,
       question,
       answer: null

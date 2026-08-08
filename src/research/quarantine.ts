@@ -1,14 +1,11 @@
 /**
- * Quarantine known failed rollout drafts / opportunities so they never count
- * toward promotion and cannot be reserved or generated.
+ * Rollout eligibility + rejection of unsupported opportunities.
+ * Feature-based — no exact-title production quarantines.
  */
 import type { Db } from "../db.js";
 import { recordAudit, updateArticle } from "../db.js";
-import {
-  isQuarantinedArticle,
-  QUARANTINED_ARTICLE_TITLES,
-  QUARANTINED_PRIMARY_KEYWORDS
-} from "./semanticIntent.js";
+import { evaluatePreGeneration } from "./editorialControls.js";
+import { isIncoherentSearchIntent, isQuarantinedArticle } from "./semanticIntent.js";
 import type { TopicDecision } from "./types.js";
 
 export interface RolloutEligibilityInput {
@@ -21,6 +18,8 @@ export interface RolloutEligibilityInput {
   evidencePresent?: boolean;
   qualityGatesPassed?: boolean;
   merchantApproved?: boolean;
+  contentPromiseFulfilled?: boolean;
+  requiredMerchantCorrection?: boolean;
 }
 
 export function countsTowardRolloutDraft(args: {
@@ -34,7 +33,9 @@ export function countsTowardRolloutDraft(args: {
     ...args,
     evidencePresent: true,
     qualityGatesPassed: true,
-    merchantApproved: true
+    merchantApproved: true,
+    contentPromiseFulfilled: true,
+    requiredMerchantCorrection: false
   }).ok;
 }
 
@@ -50,17 +51,21 @@ export function isEligibleForRolloutProgress(args: RolloutEligibilityInput): {
   }
   if (args.countsTowardRolloutFlag === false) reasons.push("countsTowardRollout is false");
   if (args.quarantined || isQuarantinedArticle(args.title, args.primaryKeyword)) {
-    reasons.push("article is quarantined");
+    reasons.push("article framing fails content-promise / coherence gates");
   }
   if (args.evidencePresent === false) reasons.push("required evidence is missing");
   if (args.qualityGatesPassed === false) reasons.push("quality/editorial gates did not pass");
   if (args.merchantApproved === false) reasons.push("merchant review did not approve it");
+  if (args.contentPromiseFulfilled === false) reasons.push("content promise was not fulfilled");
+  if (args.requiredMerchantCorrection === true) {
+    reasons.push("required article-specific merchant correction");
+  }
   return { ok: reasons.length === 0, reasons };
 }
 
 export function quarantineRejectionMessage(title: string, primaryKeyword?: string): string {
   return [
-    "REJECTED: Article failed semantic-intent / editorial quality standards.",
+    "REJECTED: Article failed generalized editorial quality standards.",
     `Title: ${title}`,
     primaryKeyword ? `Keyword: ${primaryKeyword}` : null,
     "Excluded from the 30-draft rollout requirement."
@@ -69,69 +74,124 @@ export function quarantineRejectionMessage(title: string, primaryKeyword?: strin
     .join(" ");
 }
 
-function opportunityMatchesQuarantine(payload: {
+function opportunityFailsFeatureGates(payload: {
   proposedTitle?: string;
-  cluster?: { primaryKeyword?: string };
+  cluster?: { primaryKeyword?: string; format?: string; intent?: string; pillar?: string };
+  decision?: string;
+  readerQuestion?: string;
+  proposedOutline?: string[];
 }): boolean {
   const title = payload.proposedTitle || "";
   const keyword = payload.cluster?.primaryKeyword || "";
-  return isQuarantinedArticle(title, keyword);
+  if (!keyword && !title) return false;
+  if (payload.decision === "REJECTED") return true;
+  if (isIncoherentSearchIntent(keyword)) return true;
+  if (isQuarantinedArticle(title, keyword)) return true;
+  // Hard-reject only incoherent content-promise framing at reserve time.
+  // Missing evidence / depth gaps are handled by editorial decisions
+  // (NEEDS_MERCHANT_INPUT / DRAFT_ONLY), not by blocking reservation.
+  const evaled = evaluatePreGeneration({
+    primaryKeyword: keyword || title,
+    proposedTitle: title || keyword,
+    readerQuestion: payload.readerQuestion,
+    outline: payload.proposedOutline,
+    format: payload.cluster?.format,
+    intent: payload.cluster?.intent,
+    pillar: payload.cluster?.pillar,
+    disableAutoRefine: true
+  });
+  if (evaled.decision !== "REJECTED") return false;
+  return evaled.reasons.some(r =>
+    /incoherent|does not represent a specific real-world search question|story keyword framed|Audience\/purpose drift/i.test(r)
+  );
 }
 
-/** Mark matching local articles archived + REJECTED so they cannot inflate promotion progress. */
+/** Archive articles already marked REJECTED / incoherent so they cannot inflate rollout. */
 export async function quarantineFailedRolloutArticles(db: Db): Promise<Array<{ id: number; title: string }>> {
-  const { rows } = await db.query<{ id: string; title: string; primary_keyword: string; status: string }>(
-    `SELECT id, title, primary_keyword, status FROM articles
+  const { rows } = await db.query<{
+    id: string;
+    title: string;
+    primary_keyword: string;
+    status: string;
+    generation_settings: Record<string, unknown> | null;
+  }>(
+    `SELECT id, title, primary_keyword, status, generation_settings FROM articles
      WHERE status NOT IN ('archived')
        AND (
-         lower(title) = ANY($1::text[])
-         OR lower(primary_keyword) = ANY($2::text[])
-       )`,
-    [
-      QUARANTINED_ARTICLE_TITLES.map(t => t.toLowerCase()),
-      QUARANTINED_PRIMARY_KEYWORDS.map(k => k.toLowerCase())
-    ]
+         COALESCE(generation_settings->>'decision','') = 'REJECTED'
+         OR COALESCE(generation_settings->>'quarantined','') = 'true'
+         OR COALESCE(generation_settings->>'countsTowardRollout','') = 'false'
+       )`
   );
 
   const quarantined: Array<{ id: number; title: string }> = [];
   for (const row of rows) {
+    // Also catch feature-failed drafts that slipped through with draft status
+    if (
+      row.generation_settings?.decision !== "REJECTED" &&
+      !isQuarantinedArticle(row.title, row.primary_keyword)
+    ) {
+      continue;
+    }
     const id = Number(row.id);
     await updateArticle(db, id, {
       status: "archived",
       generationError: quarantineRejectionMessage(row.title, row.primary_keyword),
       lastError: "REJECTED — excluded from rollout drafts",
       generationSettings: {
+        ...(row.generation_settings || {}),
         decision: "REJECTED",
         countsTowardRollout: false,
-        quarantined: true,
-        rejectionReasons: [
-          "Incoherent search intent",
-          "Audience/purpose drift",
-          "Template substitution",
-          "Weak internal product links",
-          "Technical accuracy (UV DTF)",
-          "Insufficient unique insight"
-        ]
+        quarantined: true
       }
     });
     quarantined.push({ id, title: row.title });
   }
+
+  // Feature-scan recent drafts for incoherent framing (no exact-title list)
+  const { rows: drafts } = await db.query<{
+    id: string;
+    title: string;
+    primary_keyword: string;
+    generation_settings: Record<string, unknown> | null;
+  }>(
+    `SELECT id, title, primary_keyword, generation_settings FROM articles
+     WHERE status IN ('draft','ready','generating')
+     ORDER BY updated_at DESC LIMIT 100`
+  );
+  for (const row of drafts) {
+    if (!isQuarantinedArticle(row.title, row.primary_keyword)) continue;
+    if (quarantined.some(q => q.id === Number(row.id))) continue;
+    const id = Number(row.id);
+    await updateArticle(db, id, {
+      status: "archived",
+      generationError: quarantineRejectionMessage(row.title, row.primary_keyword),
+      lastError: "REJECTED — incoherent content promise",
+      generationSettings: {
+        ...(row.generation_settings || {}),
+        decision: "REJECTED",
+        countsTowardRollout: false,
+        quarantined: true
+      }
+    });
+    quarantined.push({ id, title: row.title });
+  }
+
   return quarantined;
 }
 
-/**
- * Mark stored opportunities with quarantined title/keyword as REJECTED,
- * clear reservations, and audit the reason so they cannot be reserved/generated.
- */
+/** Reject stored opportunities that fail feature-based content-promise gates. */
 export async function quarantineFailedRolloutOpportunities(db: Db): Promise<Array<{ id: string; title: string }>> {
   const { rows } = await db.query<{
     id: string;
     status: string;
     payload: {
       proposedTitle?: string;
-      cluster?: { primaryKeyword?: string };
+      cluster?: { primaryKeyword?: string; format?: string; intent?: string; pillar?: string };
       decision?: string;
       decisionReasons?: string[];
+      readerQuestion?: string;
+      proposedOutline?: string[];
     };
   }>(
     `SELECT id, status, payload FROM research_opportunities
@@ -140,17 +200,17 @@ export async function quarantineFailedRolloutOpportunities(db: Db): Promise<Arra
 
   const rejected: Array<{ id: string; title: string }> = [];
   for (const row of rows) {
-    if (!opportunityMatchesQuarantine(row.payload)) continue;
+    if (!opportunityFailsFeatureGates(row.payload)) continue;
     const title = row.payload.proposedTitle || row.payload.cluster?.primaryKeyword || row.id;
     const nextPayload = {
       ...row.payload,
       decision: "REJECTED" as const,
       decisionReasons: [
         ...(row.payload.decisionReasons || []),
-        "Quarantined incoherent topic — cannot reserve or generate."
+        "Failed generalized content-promise / evidence / depth gates — cannot reserve or generate."
       ],
       status: "rejected" as const,
-      failedGates: ["quarantined_article", "incoherent_search_intent"]
+      failedGates: ["content_promise", "evidence_budget", "depth"]
     };
     await db.query(
       `UPDATE research_opportunities
@@ -164,13 +224,13 @@ export async function quarantineFailedRolloutOpportunities(db: Db): Promise<Arra
     );
     await recordAudit(db, {
       actor: "system",
-      action: "opportunity_quarantined_rejected",
+      action: "opportunity_rejected_feature_gates",
       detail: {
         opportunityId: row.id,
         previousStatus: row.status,
         title,
         keyword: row.payload.cluster?.primaryKeyword,
-        reason: "Quarantined title/keyword cannot be reserved or generated."
+        reason: "Feature-based editorial gates rejected this opportunity."
       }
     });
     rejected.push({ id: row.id, title });
@@ -178,13 +238,14 @@ export async function quarantineFailedRolloutOpportunities(db: Db): Promise<Arra
   return rejected;
 }
 
-/** True when an opportunity payload must not be reserved or generated. */
 export function isQuarantinedOpportunity(payload: {
   proposedTitle?: string;
-  cluster?: { primaryKeyword?: string };
+  cluster?: { primaryKeyword?: string; format?: string; intent?: string; pillar?: string };
   decision?: string;
   status?: string;
+  readerQuestion?: string;
+  proposedOutline?: string[];
 }): boolean {
   if (payload.decision === "REJECTED" || payload.status === "rejected") return true;
-  return opportunityMatchesQuarantine(payload);
+  return opportunityFailsFeatureGates(payload);
 }

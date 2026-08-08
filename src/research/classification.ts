@@ -40,8 +40,13 @@ export const CLASSIFICATION_RULES: ClassificationRule[] = [
   { pattern: /\b(small-?business burnout|work-?life balance|hiring and delegat)/i, pillar: "honest_entrepreneurship", subcategory: "burnout", priority: 85 },
   { pattern: /\bbusiness growth lessons\b|\bprint-?shop ownership\b/i, pillar: "honest_entrepreneurship", subcategory: "owning a job vs building a business", priority: 80 },
 
-  // Legends story / local
-  { pattern: /\bwarner robins\b|\bmiddle georgia\b|\blocal print shop story\b/i, pillar: "legends_story", subcategory: "Warner Robins storefront", priority: 85 },
+  // Local commercial / schools (must beat broad location→story mapping)
+  { pattern: /\b(school|spirit-?wear|team|order timeline).{0,60}\b(middle georgia|warner robins|local)\b|\b(middle georgia|warner robins|local).{0,60}\b(school|spirit-?wear|team|order)\b/i, pillar: "apparel_business", subcategory: "schools and teams", priority: 93 },
+  { pattern: /\b(how to choose|questions? to ask|compare).{0,40}\b(printer|vendor)\b/i, pillar: "apparel_business", subcategory: "choosing a print partner", priority: 91 },
+
+  // Legends story — require story framing, not merely a local place name
+  { pattern: /\b(local print shop story|our story|behind the scenes|warner robins storefront)\b/i, pillar: "legends_story", subcategory: "Warner Robins storefront", priority: 85 },
+  { pattern: /\b(warner robins|middle georgia).{0,40}\b(story|lessons?|reality|what we learned)\b/i, pillar: "legends_story", subcategory: "Warner Robins storefront", priority: 84 },
 
   // DTF education (specific, not embroidery)
   { pattern: /\b(dtf transfers?|gang sheets?|dtf pressing|artwork preparation|glitter dtf|glow-in-the-dark dtf|uv dtf|specialty dtf)\b/i, pillar: "dtf_education", subcategory: "production education", priority: 80 },

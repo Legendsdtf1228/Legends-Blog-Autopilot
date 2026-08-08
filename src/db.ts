@@ -306,6 +306,19 @@ export async function migrate(db: Db): Promise<void> {
     )`);
     await client.query("CREATE INDEX IF NOT EXISTS merchant_interviews_brief_idx ON merchant_interviews(brief_id)");
 
+    await client.query(`CREATE TABLE IF NOT EXISTS merchant_knowledge (
+      id bigserial PRIMARY KEY,
+      topic_class text NOT NULL,
+      question text NOT NULL,
+      answer text NOT NULL,
+      source_brief_id bigint,
+      approved_at timestamptz NOT NULL DEFAULT now(),
+      approved_by text NOT NULL DEFAULT 'merchant',
+      reusable boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS merchant_knowledge_class_idx ON merchant_knowledge(topic_class)");
+
     await client.query(`CREATE TABLE IF NOT EXISTS pillar_usage (
       id bigserial PRIMARY KEY,
       pillar text NOT NULL,

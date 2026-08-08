@@ -124,12 +124,14 @@ function emptyInventory() {
 }
 
 function makeGenerated(briefTitle: string, keyword: string): GeneratedArticle {
-  const body = `<h2>Compare decoration methods for work shirts</h2><p>${"Practical guidance for small-business owners choosing embroidery or DTF for employee uniforms. ".repeat(45)}</p><p>Legends DTF Prints is located in Warner Robins, Georgia and serves Middle Georgia.</p>`;
+  const paragraph =
+    "Small-business owners choosing employee uniforms should compare embroidery and DTF using durability, detail, wash performance, and cost-per-piece criteria before they decide. Ask which method fits daily wear, verify artwork constraints, and choose the option that matches the job. ";
+  const body = `<h2>Decision criteria for work-shirt decoration</h2><p>${paragraph.repeat(20)}</p><h2>Trade-offs and exceptions</h2><p>${paragraph.repeat(15)}</p><p>When you are ready, review current product options on the storefront.</p>`;
   return {
     title: briefTitle.slice(0, 70),
     handle: "embroidery-vs-dtf-for-work-shirts",
     summary: "Compare embroidery and DTF for work shirts with practical buyer guidance.",
-    metaDescription: "Embroidery vs DTF for work shirts: durability, detail, and cost guidance for uniform buyers from Legends DTF Prints.",
+    metaDescription: "Embroidery vs DTF for work shirts: durability, detail, and cost guidance for uniform buyers choosing the right decoration method.",
     bodyHtml: body,
     tags: ["embroidery", "DTF", "work shirts"],
     primaryKeyword: keyword,
@@ -496,15 +498,17 @@ test("SHADOW_AUTO cycle records wouldPublish without calling Shopify", async () 
       loadContentInventory: async () => emptyInventory(),
       runResearchCycle: async () => makeCycleResult(opportunity),
       generateArticle: async ({ brief }) => {
-        const meta = `${brief!.primaryKeyword}: compare durability, detail, cost, and turnaround for uniform buyers with Legends DTF Prints.`;
+        const meta =
+          "Embroidery vs DTF for work shirts: durability, detail, and cost guidance for uniform buyers choosing the right decoration method today.";
         const padded = meta.length >= 145 ? meta.slice(0, 160) : (meta + " See current options on legendsdtf.com today.").slice(0, 160);
-        const paragraph = "Practical guidance for small-business owners choosing embroidery or DTF for employee work-shirt uniforms with clear commercial tradeoffs. ";
+        const paragraph =
+          "Small-business owners choosing employee uniforms should compare embroidery and DTF using durability, detail, wash performance, and cost-per-piece criteria. Ask which method fits daily wear, verify artwork constraints, and choose the option that matches the job. ";
         return {
           title: (brief!.proposedTitle.length >= 25 ? brief!.proposedTitle : "Embroidery vs. DTF Printing: Which Is Better for Work Shirts?").slice(0, 70),
           handle: brief!.proposedHandle || "embroidery-vs-dtf-for-work-shirts",
           summary: padded.slice(0, 200),
           metaDescription: padded,
-          bodyHtml: `<h2>Compare decoration methods for work shirts</h2><p>${paragraph.repeat(30)}</p><h2>Decision checklist</h2><p>${paragraph.repeat(15)}</p><p>Legends DTF Prints is located in Warner Robins, Georgia and serves Middle Georgia.</p>`,
+          bodyHtml: `<h2>Decision criteria for work-shirt decoration</h2><p>${paragraph.repeat(20)}</p><h2>Trade-offs and exceptions</h2><p>${paragraph.repeat(15)}</p><p>When you are ready, review current product options on the storefront.</p>`,
           tags: ["embroidery", "DTF", "work shirts"],
           primaryKeyword: brief!.primaryKeyword,
           topicFingerprint: "embroidery-vs-dtf-work-shirts",

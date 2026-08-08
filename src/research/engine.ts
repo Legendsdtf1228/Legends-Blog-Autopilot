@@ -30,8 +30,10 @@ import {
   type UsageRecord
 } from "./rotation.js";
 import { demandFromSignals, formatCollectedLabel, growthFromSignals, scoreOpportunity } from "./scoring.js";
-import { isIncoherentSearchIntent, isQuarantinedArticle } from "./semanticIntent.js";
-import { assessTopicSpecificity, buildTopicSpecificOutline, suggestRefinement } from "./specificity.js";
+import { evaluatePreGeneration } from "./editorialControls.js";
+import { isIncoherentSearchIntent } from "./semanticIntent.js";
+import { assessTopicSpecificity, suggestRefinement } from "./specificity.js";
+import { buildIntentOutline } from "./templateDetection.js";
 import type {
   ArticleFormatId,
   AudienceId,
@@ -154,6 +156,11 @@ function formatForRefinedIntent(pillarFormats: ArticleFormatId[], intent: Search
   return pillarFormats[0]!;
 }
 
+function productsPlaceholderConversion(products: { title: string }[]): string {
+  if (!products.length) return "Trust-building article; no direct product pitch required.";
+  return "Point readers to the single most relevant next step after their decision.";
+}
+
 /**
  * Apply keyword refinement *before* overlap/products/scores/interview so every
  * dependent field describes the refined candidate, never the discarded seed.
@@ -177,7 +184,7 @@ export function applyTopicRefinement(cluster: KeywordCluster, usage: UsageRecord
     Boolean(refinement) &&
     (next.primaryKeyword.trim().split(/\s+/).length <= 2 ||
       isIncoherentSearchIntent(next.primaryKeyword) ||
-      isQuarantinedArticle("", next.primaryKeyword));
+      isIncoherentSearchIntent(next.primaryKeyword));
 
   if (shouldRefine && refinement) {
     next.primaryKeyword = refinement.keyword;
@@ -305,11 +312,67 @@ export async function runResearchCycle(args: {
     // Prefer refinement metadata for either the raw seed or the (already refined) keyword.
     const refinementMeta =
       suggestRefinement(rawCluster.primaryKeyword) || suggestRefinement(cluster.primaryKeyword);
-    const proposedTitle = refinementMeta?.title || buildTitle(cluster);
-    const readerQuestion = refinementMeta?.readerQuestion
+    let proposedTitle = refinementMeta?.title || buildTitle(cluster);
+    let readerQuestion = refinementMeta?.readerQuestion
       || `What should ${AUDIENCE_LABELS[cluster.audience].toLowerCase()} know about ${cluster.primaryKeyword}?`;
-    const audienceLabel = refinementMeta?.audience || AUDIENCE_LABELS[cluster.audience];
-    const proposedOutline = buildTopicSpecificOutline(cluster, readerQuestion);
+    let audienceLabel = refinementMeta?.audience || AUDIENCE_LABELS[cluster.audience];
+    let proposedOutline = buildIntentOutline({
+      primaryKeyword: cluster.primaryKeyword,
+      readerQuestion,
+      promiseClass: "informational_general",
+      audienceLabel,
+      subcategory: cluster.subcategory
+    });
+
+    const preGen = evaluatePreGeneration({
+      primaryKeyword: cluster.primaryKeyword,
+      proposedTitle,
+      audienceLabel,
+      readerQuestion,
+      outline: proposedOutline,
+      whyDistinct: closest ? `Different angle from “${closest.title}”` : "No close match",
+      conversionPath: productsPlaceholderConversion(args.products),
+      format: cluster.format,
+      intent: cluster.intent,
+      pillar: cluster.pillar,
+      interviewComplete: false,
+      hasTechnicalFacts: args.products.length > 0,
+      hasLocalFacts: /\blocal|warner|georgia\b/i.test(cluster.primaryKeyword + proposedTitle)
+    });
+
+    // Apply editorial refinement (feature-based) onto the live candidate
+    if (preGen.refined) {
+      cluster.primaryKeyword = preGen.refined.keyword;
+      cluster.secondaryKeywords = [...new Set([preGen.refined.keyword, ...cluster.secondaryKeywords])].slice(0, 8);
+      cluster.intent = (preGen.refined.intent === "local" || preGen.refined.intent === "commercial"
+        ? preGen.refined.intent
+        : cluster.intent) as SearchIntent;
+      const again = validateOrReclassify(cluster.primaryKeyword, {
+        pillar: cluster.pillar,
+        subcategory: cluster.subcategory
+      });
+      cluster.pillar = again.pillar;
+      cluster.subcategory = again.subcategory;
+      const pillarAfter = pillarById(cluster.pillar);
+      if (pillarAfter.formats.includes("checklist")) cluster.format = "checklist";
+      if (pillarAfter.audiences.includes("local_customers")) cluster.audience = "local_customers";
+      proposedTitle = preGen.refined.title;
+      readerQuestion = preGen.refined.readerQuestion;
+      audienceLabel = preGen.refined.audience;
+      proposedOutline = preGen.refined.outline;
+      cluster.id = createHash("sha1")
+        .update(`${cluster.pillar}|${cluster.intent}|${cluster.primaryKeyword.toLowerCase()}`)
+        .digest("hex")
+        .slice(0, 16);
+    } else {
+      proposedOutline = buildIntentOutline({
+        primaryKeyword: cluster.primaryKeyword,
+        readerQuestion,
+        promiseClass: preGen.contentPromise.primaryClass,
+        audienceLabel,
+        subcategory: cluster.subcategory
+      });
+    }
 
     const productsToFeature = selectProductsForKeyword({
       products: args.products,
@@ -321,10 +384,13 @@ export async function runResearchCycle(args: {
       limit: 3
     });
 
-    const requiresInterview = settings.requireInterviewForFirstPerson &&
-      (cluster.format === "first_person_story" ||
-        cluster.pillar === "honest_entrepreneurship" ||
-        cluster.pillar === "legends_story");
+    const requiresInterview =
+      preGen.requiresInterview ||
+      (settings.requireInterviewForFirstPerson &&
+        (cluster.format === "first_person_story" ||
+          cluster.pillar === "honest_entrepreneurship" ||
+          cluster.pillar === "legends_story") &&
+        preGen.contentPromise.requiresFirsthand);
 
     const scores = scoreOpportunity({
       signals: demandSignals,
@@ -335,7 +401,7 @@ export async function runResearchCycle(args: {
       freshnessScore: completeness === "unavailable" ? 0.3 : 0.7,
       contentGapScore: closest ? 1 - closest.score : 0.85,
       overlapPenalty: closest?.score ?? 0,
-      factualConfidence: cluster.pillar === "honest_entrepreneurship" ? 0.4 : 0.7,
+      factualConfidence: requiresInterview ? 0.35 : cluster.pillar === "honest_entrepreneurship" ? 0.4 : 0.7,
       weights: settings.weights,
       maxVolume,
       maxInterest
@@ -349,18 +415,11 @@ export async function runResearchCycle(args: {
       whyDistinct: closest ? `Different angle from “${closest.title}”` : "No close match"
     });
 
-    const semanticRejected =
-      isIncoherentSearchIntent(cluster.primaryKeyword) ||
-      isQuarantinedArticle(proposedTitle, cluster.primaryKeyword) ||
-      (!specificity.ok && specificity.reasons.some(r =>
-        /coherent apparel-buyer search intent|Audience\/purpose drift|Title does not represent/i.test(r)
-      ));
-
     const uniqueness = uniquenessFromOverlap(closest?.score ?? 0);
     const sourceQuality = demandClass === "verified_demand" ? 0.85 : demandClass === "inferred_opportunity" ? 0.55 : 0.45;
     const scorecard = scorecardFromOpportunity({
       scores,
-      topicSpecificity: specificity.score,
+      topicSpecificity: Math.min(specificity.score, preGen.depth.score),
       uniqueness,
       sourceQuality,
       articleQuality: 0,
@@ -375,20 +434,34 @@ export async function runResearchCycle(args: {
       specificityOk:
         specificity.ok &&
         specificity.score >= settings.minTopicSpecificity &&
+        preGen.depth.ok !== false &&
         !specificity.reasons.some(r => /Broad one-word|Generic title|placeholder|coherent apparel-buyer|Audience\/purpose drift/i.test(r)),
       overlapRejected,
       classificationInvalid: false,
-      semanticRejected,
-      semanticReasons: specificity.reasons.filter(r =>
-        /coherent apparel-buyer|Audience\/purpose drift|Title does not represent|quarantined|template/i.test(r)
-      )
+      semanticRejected: preGen.decision === "REJECTED",
+      semanticReasons: preGen.reasons,
+      editorialDecision: preGen.decision,
+      editorialReasons: preGen.reasons
     });
 
-    if (outcome.decision === "REJECTED") continue;
+    // Prefer editorial controls when they are stricter than score-only outcomes
+    let finalDecision = outcome.decision;
+    let finalReasons = outcome.reasons;
+    if (preGen.decision === "NEEDS_MERCHANT_INPUT") {
+      finalDecision = "NEEDS_MERCHANT_INPUT";
+      finalReasons = preGen.reasons;
+    } else if (preGen.decision === "REJECTED") {
+      finalDecision = "REJECTED";
+      finalReasons = preGen.reasons;
+    } else if (preGen.decision === "DRAFT_ONLY" && outcome.decision === "AUTO_ELIGIBLE") {
+      finalDecision = "DRAFT_ONLY";
+      finalReasons = preGen.reasons;
+    }
 
     const failedGates = [
       ...specificity.reasons,
-      ...outcome.reasons.filter(r => outcome.decision !== "AUTO_ELIGIBLE")
+      ...preGen.evidenceBudget.missingEvidence,
+      ...finalReasons.filter(r => finalDecision !== "AUTO_ELIGIBLE")
     ];
 
     const dataLabel = formatCollectedLabel(now, completeness);
@@ -415,28 +488,52 @@ export async function runResearchCycle(args: {
       proposedHandle: slugify(proposedTitle),
       proposedOutline,
       readerQuestion,
-      topicSpecificity: specificity.score,
+      topicSpecificity: Math.min(specificity.score, preGen.depth.score),
       uniqueness,
       demandClass,
-      decision: outcome.decision,
-      decisionReasons: outcome.reasons,
+      decision: finalDecision,
+      decisionReasons: finalReasons,
       failedGates,
       internalLinks: productsToFeature.map(p => p.url),
       externalSources: [],
-      status: "suggested"
+      status: finalDecision === "REJECTED" ? "rejected" : "suggested",
+      editorialDecision: {
+        ...preGen.trace,
+        decision: finalDecision,
+        reasons: finalReasons
+      },
+      contentPromiseClass: preGen.contentPromise.primaryClass,
+      evidenceConfidence: preGen.evidenceBudget.confidence
     });
   }
 
-  // Prefer AUTO_ELIGIBLE, then DRAFT_ONLY / NEEDS_MERCHANT_INPUT by score
+  // Autonomous fallback: prefer AUTO_ELIGIBLE. Merchant-input never blocks the schedule.
+  // DRAFT_ONLY is kept for visibility/review but is not the preferred autonomous pick.
   const rank = (d: TopicDecision) =>
-    d === "AUTO_ELIGIBLE" ? 3 : d === "DRAFT_ONLY" ? 2 : d === "NEEDS_MERCHANT_INPUT" ? 1 : 0;
+    d === "AUTO_ELIGIBLE" ? 4 : d === "DRAFT_ONLY" ? 2 : d === "NEEDS_MERCHANT_INPUT" ? 1 : 0;
   opportunities.sort((a, b) =>
     rank(b.decision) - rank(a.decision) || b.scores.opportunityScore - a.scores.opportunityScore
   );
 
-  const selected = opportunities.find(o =>
-    o.decision === "AUTO_ELIGIBLE" || o.decision === "DRAFT_ONLY" || o.decision === "NEEDS_MERCHANT_INPUT"
-  ) ?? null;
+  const auto = opportunities.find(o => o.decision === "AUTO_ELIGIBLE");
+  const draft = opportunities.find(o => o.decision === "DRAFT_ONLY");
+  const merchant = opportunities.find(o => o.decision === "NEEDS_MERCHANT_INPUT");
+  const selected = auto ?? draft ?? merchant ?? null;
+  if (selected && merchant && selected.id !== merchant.id) {
+    merchant.editorialDecision = {
+      ...(merchant.editorialDecision || {
+        originalKeyword: merchant.cluster.primaryKeyword,
+        originalTitle: merchant.proposedTitle,
+        missingEvidence: [],
+        reasons: merchant.decisionReasons
+      }),
+      replacedByOtherTopic: true,
+      reasons: [
+        ...(merchant.editorialDecision?.reasons || merchant.decisionReasons),
+        `Skipped for schedule — selected “${selected.proposedTitle}” instead.`
+      ]
+    };
+  }
 
   const cycleDecision: TopicDecision = selected
     ? selected.decision
@@ -451,7 +548,7 @@ export async function runResearchCycle(args: {
     cycleDecision,
     cycleDecisionReasons: selected
       ? selected.decisionReasons
-      : ["No topic met specificity, uniqueness, and safety requirements. Safe skip."]
+      : ["No topic met content-promise, evidence, depth, and safety requirements. Safe skip — do not publish weak filler."]
   };
 }
 

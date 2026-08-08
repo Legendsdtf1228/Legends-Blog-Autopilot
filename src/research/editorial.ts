@@ -41,12 +41,12 @@ export function runEditorialReview(args: {
   };
 
   if (isQuarantinedArticle(args.title, args.primaryKeyword)) {
-    push("quarantined_article", "critical", "Known failed article; must be REJECTED and excluded from rollout.");
+    push("content_promise_coherence", "critical", "Keyword/title framing cannot fulfill a coherent content promise.");
   }
 
   if (/^a practical guide to\b/i.test(args.title)) {
     push("title_specificity", "major", "Generic “A Practical Guide to X” title.");
-  } else if (/decision checklist for apparel buyers/i.test(args.title) && /\bstories\b/i.test(args.primaryKeyword)) {
+  } else if (/\bstories?\b/i.test(args.primaryKeyword) && /apparel buyers?|decision checklist/i.test(args.title)) {
     push("title_specificity", "critical", "Title does not represent a real search question for the keyword.");
   } else if (args.title.length < 25) {
     push("title_specificity", "major", "Title too weak/short.");

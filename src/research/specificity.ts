@@ -171,11 +171,30 @@ export function isPlaceholderOutline(outline: string[]): boolean {
 
 export function buildTopicSpecificOutline(cluster: KeywordCluster, readerQuestion: string): string[] {
   const k = cluster.primaryKeyword;
+  // Intent-led structure — avoid the interchangeable “What X means / Common mistakes / How Legends can help” template.
+  if (cluster.format === "comparison" || /\bvs\.?\b|versus|compar/i.test(k)) {
+    return [
+      `Decision criteria for evaluating ${k}`,
+      `Side-by-side trade-offs that answer: ${readerQuestion}`,
+      `When each option is the better fit`,
+      `Exceptions and common selection mistakes`,
+      `A practical next step after you choose`
+    ];
+  }
+  if (cluster.format === "checklist" || cluster.format === "how_to" || cluster.intent === "local") {
+    return [
+      `Clarify the job-to-be-done behind “${k}”`,
+      `Questions to ask before you commit`,
+      `How to compare options against your constraints`,
+      `Red flags and conditions that change the answer`,
+      `Your next concrete step`
+    ];
+  }
   return [
-    `What “${k}” means for ${cluster.audience.replace(/_/g, " ")} facing this decision`,
-    `Answer the reader question: ${readerQuestion}`,
-    `Compare the practical trade-offs specific to ${cluster.subcategory}`,
-    `Common mistakes when choosing or applying ${k}`,
-    `How Legends DTF Prints in Warner Robins / Middle Georgia can help next`
+    `What ${cluster.audience.replace(/_/g, " ")} need to decide about ${k}`,
+    `Answer: ${readerQuestion}`,
+    `Trade-offs specific to ${cluster.subcategory}`,
+    `Conditions and exceptions that change the answer`,
+    `A useful next step without a hard sell`
   ];
 }

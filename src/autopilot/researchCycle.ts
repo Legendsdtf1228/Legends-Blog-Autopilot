@@ -520,8 +520,48 @@ export async function executeScheduledResearchCycle(args: {
       };
     }
 
-    opportunityId = result.selected.id;
-    const reserved = await reserveOpportunity(args.db, result.selected.id, `cycle:${args.slotKey}`);
+    // Autonomous fallback: never let merchant-input topics block the schedule when
+    // another AUTO_ELIGIBLE opportunity can satisfy cadence (prefer AUTO over DRAFT_ONLY filler).
+    let selectedOpp = result.selected;
+    if (selectedOpp.decision === "NEEDS_MERCHANT_INPUT") {
+      const replacement = result.opportunities.find(o =>
+        o.id !== selectedOpp.id &&
+        o.decision === "AUTO_ELIGIBLE" &&
+        o.status !== "rejected"
+      ) || result.opportunities.find(o =>
+        o.id !== selectedOpp.id &&
+        o.decision === "DRAFT_ONLY" &&
+        o.status !== "rejected"
+      );
+      if (replacement) {
+        selectedOpp = {
+          ...replacement,
+          editorialDecision: {
+            ...(replacement.editorialDecision || {}),
+            replacedByOtherTopic: false,
+            reasons: [
+              ...(replacement.decisionReasons || []),
+              `Selected instead of merchant-input topic “${result.selected.proposedTitle}”.`
+            ]
+          }
+        };
+        await recordAudit(args.db, {
+          actor: args.actor || "scheduler",
+          action: "research_cycle_skipped_merchant_input_topic",
+          detail: {
+            slotKey: args.slotKey,
+            skippedOpportunityId: result.selected.id,
+            skippedTitle: result.selected.proposedTitle,
+            selectedOpportunityId: selectedOpp.id,
+            selectedTitle: selectedOpp.proposedTitle,
+            missingEvidence: result.selected.editorialDecision?.missingEvidence || []
+          }
+        });
+      }
+    }
+
+    opportunityId = selectedOpp.id;
+    const reserved = await reserveOpportunity(args.db, selectedOpp.id, `cycle:${args.slotKey}`);
     if (!reserved) {
       await completeResearchSlot(args.db, runId, {
         decision: "SKIPPED_NO_QUALIFIED_TOPIC",
@@ -549,7 +589,12 @@ export async function executeScheduledResearchCycle(args: {
 
     if (brief.requiresInterview || brief.decision === "NEEDS_MERCHANT_INPUT") {
       const interview = await getInterviewForBrief(args.db, brief.id!);
-      if (!interview) await saveInterview(args.db, createInterviewDraft(brief.id!));
+      if (!interview) {
+        await saveInterview(
+          args.db,
+          createInterviewDraft(brief.id!, brief.interviewQuestions)
+        );
+      }
       await completeResearchSlot(args.db, runId, {
         decision: "NEEDS_MERCHANT_INPUT",
         reasons: brief.decisionReasons.length
@@ -562,7 +607,14 @@ export async function executeScheduledResearchCycle(args: {
       await recordAudit(args.db, {
         actor: args.actor || "scheduler",
         action: "research_cycle_needs_merchant_input",
-        detail: { slotKey: args.slotKey, briefId, opportunityId, mode }
+        detail: {
+          slotKey: args.slotKey,
+          briefId,
+          opportunityId,
+          mode,
+          contentPromiseClass: brief.contentPromiseClass,
+          missingEvidence: brief.editorialDecision?.missingEvidence || []
+        }
       });
       return {
         ok: true,

@@ -5,6 +5,7 @@ import {
   assertNoInventedPersonalExperience,
   avoidRepeatedDtfBias,
   briefFromCustomTopic,
+  evaluateCustomTopic,
   buildArticleBrief,
   buildLockedFactSheet,
   clusterSignals,
@@ -210,18 +211,19 @@ test("requires citations / review flags for current statistics topics", () => {
 });
 
 test("generates accurate SEO title/meta constraints through quality gates", () => {
-  const brief = briefFromCustomTopic("pricing custom shirts for profit", {
-    businessFacts: ["Use website for current prices."]
+  // Use a supportable non-pricing topic — cost promises require verified numbers and are REJECTED.
+  const brief = briefFromCustomTopic("gang sheet planning for school spirit orders", {
+    businessFacts: ["Services include custom DTF transfers and gang sheets."]
   });
   const report = runQualityGates({
     brief,
     draft: {
-      title: "Pricing Custom Shirts for Profit Without Guesswork",
-      handle: "pricing-custom-shirts-for-profit",
-      excerpt: "A practical way to price custom shirts using garment and transfer costs.",
-      metaTitle: "Pricing Custom Shirts for Profit",
-      metaDescription: "Learn how to price custom shirts for profit using garment and transfer costs—without invented guarantees—from Legends DTF Prints.",
-      bodyHtml: `<h2>Pricing custom shirts</h2><p>${"word ".repeat(520)}</p><p>Use current product pages for prices.</p>`,
+      title: "Gang Sheet Planning for School Spirit Orders",
+      handle: "gang-sheet-planning-school-spirit",
+      excerpt: "A practical way to plan gang sheets for school spirit orders.",
+      metaTitle: "Gang Sheet Planning for School Spirit Orders",
+      metaDescription: "Learn how to plan gang sheets for school spirit orders with artwork layout tips—without invented guarantees—from Legends DTF Prints.",
+      bodyHtml: `<h2>Plan the gang sheet before you order</h2><p>${"word ".repeat(520)}</p><p>Use current product pages for options.</p>`,
       primaryKeyword: brief.primaryKeyword,
       secondaryKeywords: []
     }
@@ -229,6 +231,18 @@ test("generates accurate SEO title/meta constraints through quality gates", () =
   assert.equal(report.qualityGateResults.find(g => g.gate === "meta_description")?.ok, true);
   assert.equal(report.qualityGateResults.find(g => g.gate === "title_quality")?.ok, true);
   assert.equal(report.qualityGateResults.find(g => g.gate === "topic_preservation")?.ok, true);
+});
+
+test("cost/pricing custom topics are rejected without verified numbers", () => {
+  const result = evaluateCustomTopic("pricing custom shirts for profit", {
+    businessFacts: ["Use website for current prices."],
+    existingArticles: []
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.brief.decision, "REJECTED");
+    assert.ok(result.brief.decisionReasons.some(r => /cost|pricing|verified/i.test(r)));
+  }
 });
 
 test("preserves approved topic through brief construction", () => {

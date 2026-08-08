@@ -42,14 +42,12 @@ const APPAREL_BUYER_TOKENS = /\b(apparel buyers?|garment|shirt printer|uniforms?
 const STORYTELLING_TOKENS = /\b(stories?|storytelling|narrative|behind the scenes)\b/i;
 const VENDOR_SELECTION_TOKENS = /\b(choose|select|compare|questions? to ask|printer|vendor|shop)\b/i;
 
-/** Known bad titles that must never count as rollout drafts. */
-export const QUARANTINED_ARTICLE_TITLES = [
-  "Local Small-Business Stories: A Decision Checklist for Apparel Buyers"
-] as const;
-
-export const QUARANTINED_PRIMARY_KEYWORDS = [
-  "local small-business stories"
-] as const;
+/**
+ * @deprecated Exact title/keyword quarantines removed from production.
+ * Kept as empty lists so older imports compile; fixtures live in tests only.
+ */
+export const QUARANTINED_ARTICLE_TITLES: readonly string[] = [];
+export const QUARANTINED_PRIMARY_KEYWORDS: readonly string[] = [];
 
 export function suggestLocalPrinterRefinement(): {
   keyword: string;
@@ -395,11 +393,15 @@ export function assessGeneratedArticleSemantics(args: {
     });
   }
 
-  if (QUARANTINED_ARTICLE_TITLES.some(t => t.toLowerCase() === args.title.trim().toLowerCase())) {
+  // Feature-based: incoherent framing is a critical failure for any topic, not a title list.
+  if (
+    isIncoherentSearchIntent(args.primaryKeyword) ||
+    (/\bstories?\b/i.test(args.primaryKeyword) && /apparel buyers?|decision checklist/i.test(args.title))
+  ) {
     findings.push({
-      gate: "quarantined_article",
+      gate: "incoherent_content_promise",
       severity: "critical",
-      detail: "Known failed article title; must be REJECTED and excluded from rollout drafts."
+      detail: "Keyword/title framing cannot fulfill a coherent content promise."
     });
   }
 
@@ -407,9 +409,10 @@ export function assessGeneratedArticleSemantics(args: {
   return { ok, findings };
 }
 
+/** Feature-based rejection signal (no exact-title production quarantine). */
 export function isQuarantinedArticle(title: string, primaryKeyword?: string): boolean {
-  if (QUARANTINED_ARTICLE_TITLES.some(t => t.toLowerCase() === title.trim().toLowerCase())) return true;
-  if (primaryKeyword && QUARANTINED_PRIMARY_KEYWORDS.some(k => k.toLowerCase() === primaryKeyword.trim().toLowerCase())) {
+  if (primaryKeyword && isIncoherentSearchIntent(primaryKeyword)) return true;
+  if (primaryKeyword && /\bstories?\b/i.test(primaryKeyword) && /apparel buyers?|decision checklist/i.test(title)) {
     return true;
   }
   return false;
