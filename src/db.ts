@@ -334,6 +334,83 @@ export async function migrate(db: Db): Promise<void> {
     )`);
     await client.query("CREATE INDEX IF NOT EXISTS merchant_knowledge_class_idx ON merchant_knowledge(topic_class)");
 
+    // M2: source-backed ReaderTask ingestion (additive; does not alter opportunities)
+    await client.query(`CREATE TABLE IF NOT EXISTS source_evidence (
+      id text PRIMARY KEY,
+      provider text NOT NULL,
+      provider_version text NOT NULL,
+      source_type text NOT NULL,
+      source_reference text NOT NULL,
+      collected_at timestamptz NOT NULL,
+      period_start timestamptz,
+      period_end timestamptz,
+      geographic_relevance text,
+      normalized_problem text NOT NULL,
+      normalized_question text NOT NULL,
+      evidence_summary text NOT NULL,
+      metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
+      confidence text NOT NULL,
+      freshness text NOT NULL,
+      provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+      payload jsonb NOT NULL,
+      schema_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (provider, source_reference)
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS source_evidence_type_idx ON source_evidence(source_type)");
+    await client.query("CREATE INDEX IF NOT EXISTS source_evidence_collected_idx ON source_evidence(collected_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS reader_tasks (
+      id text PRIMARY KEY,
+      payload jsonb NOT NULL,
+      semantic_fingerprint text NOT NULL,
+      demand_status text NOT NULL,
+      normalization_status text NOT NULL
+        CHECK (normalization_status IN ('accepted','rejected')),
+      rejection_reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+      schema_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS reader_tasks_status_idx ON reader_tasks(normalization_status, updated_at DESC)");
+    await client.query("CREATE INDEX IF NOT EXISTS reader_tasks_fingerprint_idx ON reader_tasks(semantic_fingerprint)");
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS reader_tasks_fingerprint_accepted_uidx
+      ON reader_tasks(semantic_fingerprint)
+      WHERE normalization_status = 'accepted'
+    `);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS source_evidence_reader_tasks (
+      source_evidence_id text NOT NULL REFERENCES source_evidence(id) ON DELETE CASCADE,
+      reader_task_id text NOT NULL REFERENCES reader_tasks(id) ON DELETE CASCADE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (source_evidence_id, reader_task_id)
+    )`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS reader_task_rejections (
+      id bigserial PRIMARY KEY,
+      reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+      supporting_evidence_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS reader_task_rejections_created_idx ON reader_task_rejections(created_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS source_ingestion_runs (
+      id bigserial PRIMARY KEY,
+      provider text NOT NULL,
+      available boolean NOT NULL,
+      reason text,
+      collected_at timestamptz NOT NULL,
+      inserted_count integer NOT NULL DEFAULT 0,
+      updated_count integer NOT NULL DEFAULT 0,
+      rejected_count integer NOT NULL DEFAULT 0,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS source_ingestion_runs_provider_idx ON source_ingestion_runs(provider, collected_at DESC)");
+
     await client.query(`CREATE TABLE IF NOT EXISTS pillar_usage (
       id bigserial PRIMARY KEY,
       pillar text NOT NULL,
@@ -397,7 +474,7 @@ export async function migrate(db: Db): Promise<void> {
       `INSERT INTO schema_migrations(id) VALUES
         ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research'),
         ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim'),
-        ('007_rollout_draft_counted_unique')
+        ('007_rollout_draft_counted_unique'), ('008_source_evidence_reader_tasks')
        ON CONFLICT DO NOTHING`
     );
 

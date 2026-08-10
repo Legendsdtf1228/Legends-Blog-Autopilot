@@ -3,16 +3,15 @@
  * M1 foundation — stamp helpers available; mandatory stamping begins M2+.
  */
 export const PIPELINE_VERSIONS = {
-  provider: "provider.v1.seed-shopify-stubs",
-  normalization: "normalization.v0.keyword-only",
+  provider: "provider.v2.approved-faq-and-seed-brainstorm",
+  normalization: "normalization.v1.source-evidence-to-reader-task",
   clustering: "clustering.v0.jaccard-keyword",
   titleGeneration: "title.v0.template-and-refinement",
   decisionPolicy: "decision.v1.auto-only-generation",
   briefSchema: "brief.v1.opportunity-copy",
   generationPrompt: "generation.v1.writer-json",
   verificationRubric: "verification.v1.quality-gates",
-  /** Bump when ReaderTask becomes source of truth (M2+). */
-  readerTaskSchema: "readerTask.v0.types-only"
+  readerTaskSchema: "readerTask.v1"
 } as const;
 
 export type PipelineVersionKey = keyof typeof PIPELINE_VERSIONS;

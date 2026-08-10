@@ -520,10 +520,56 @@ export function researchPage(args: {
   cycle: { collectedAt: string; missingProviders: Array<{ provider: string; reason: string }>; signalCount: number } | null;
   opportunities: ResearchOpportunity[];
   pillars: typeof CONTENT_PILLARS;
+  sourceHealth?: {
+    providers: Array<{
+      provider: string;
+      available: boolean;
+      reason: string | null;
+      lastCollectedAt: string | null;
+    }>;
+    sourceCountByType: Array<{ sourceType: string; count: number }>;
+    readerTaskCount: number;
+    acceptedReaderTaskCount: number;
+    rejectedNormalizationCount: number;
+    recentRejectionReasons: Array<{ reason: string; count: number }>;
+  } | null;
 }) {
   const missing = args.cycle?.missingProviders?.length
     ? `<div class="notice">${args.cycle.missingProviders.map(m => `<div><strong>${esc(m.provider)}</strong>: ${esc(m.reason)}</div>`).join("")}</div>`
     : `<p class="muted">No missing providers recorded yet.</p>`;
+
+  const sourceHealth = args.sourceHealth;
+  const sourceHealthCard = sourceHealth
+    ? `<section class="card">
+        <h3>Source evidence health (M2)</h3>
+        <p class="muted">First-party ingestion status. Seed brainstorming is never validated demand. Generation pipeline unchanged.</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(sourceHealth.acceptedReaderTaskCount))}</strong> accepted ReaderTasks · ${esc(String(sourceHealth.readerTaskCount))} total</div>
+          <div><strong>${esc(String(sourceHealth.rejectedNormalizationCount))}</strong> normalization rejections</div>
+        </div>
+        <h4>Providers</h4>
+        <ul>${sourceHealth.providers.length
+          ? sourceHealth.providers.map(p =>
+              `<li><strong>${esc(p.provider)}</strong>: ${p.available ? "available" : "unavailable"}
+                ${p.lastCollectedAt ? ` · last ${esc(new Date(p.lastCollectedAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}` : ""}
+                ${p.reason ? `<div class="muted">${esc(p.reason)}</div>` : ""}</li>`
+            ).join("")
+          : "<li class=\"muted\">No ingestion runs yet. Use “Ingest approved sources”.</li>"}</ul>
+        <h4>Sources by type</h4>
+        <ul>${sourceHealth.sourceCountByType.length
+          ? sourceHealth.sourceCountByType.map(s => `<li>${esc(s.sourceType)}: ${esc(String(s.count))}</li>`).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        ${sourceHealth.recentRejectionReasons.length
+          ? `<h4>Recent rejection reasons</h4><ul>${sourceHealth.recentRejectionReasons.map(r =>
+              `<li>${esc(r.reason)}: ${esc(String(r.count))}</li>`
+            ).join("")}</ul>`
+          : ""}
+        <form method="post" action="/research/ingest-sources" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Ingest approved sources</button>
+        </form>
+      </section>`
+    : "";
 
   const failureSummary = (() => {
     const counts = new Map<string, number>();
@@ -583,6 +629,7 @@ export function researchPage(args: {
     ${args.cycle ? `<p><strong>${esc(args.cycle.signalCount)}</strong> signals · collected ${esc(new Date(args.cycle.collectedAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>` : ""}
     ${missing}
   </section>
+  ${sourceHealthCard}
   ${failureSummary}
   <section class="card">
     <h3>Approved content pillars</h3>

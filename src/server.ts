@@ -90,6 +90,8 @@ import {
   saveInterview,
   saveResearchCycle,
   storeApprovedInterviewKnowledge,
+  getSourceIngestionHealth,
+  runSourceEvidenceIngestion,
   updateBrief
 } from "./research/index.js";
 
@@ -338,7 +340,11 @@ app.get("/", async (req: AuthedRequest, res) => {
 // ---- Topic research ----
 app.get("/research", async (req: AuthedRequest, res) => {
   const settings = await getSettings(db);
-  const [cycle, opportunities] = await Promise.all([latestCycleMeta(db), listOpportunities(db, 40)]);
+  const [cycle, opportunities, sourceHealth] = await Promise.all([
+    latestCycleMeta(db),
+    listOpportunities(db, 40),
+    getSourceIngestionHealth(db).catch(() => null)
+  ]);
   res.send(layout({
     active: "/research",
     config,
@@ -351,9 +357,34 @@ app.get("/research", async (req: AuthedRequest, res) => {
       csrf: getCsrf(req),
       cycle,
       opportunities,
-      pillars: CONTENT_PILLARS
+      pillars: CONTENT_PILLARS,
+      sourceHealth
     })
   }));
+});
+
+app.post("/research/ingest-sources", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await runSourceEvidenceIngestion(db, {
+      region: settings.research.region || settings.timezone,
+      includeSeedBrainstorm: false,
+      env: process.env
+    });
+    const notice =
+      `Source ingestion complete: ${result.readerTasksAccepted} ReaderTask(s) accepted, ` +
+      `${result.readerTasksRejected} rejected, ` +
+      `${result.persisted.inserted} evidence inserted / ${result.persisted.updated} updated. ` +
+      `Generation pipeline unchanged.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Source ingestion failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
 });
 
 app.post("/research/run", async (req: AuthedRequest, res) => {
