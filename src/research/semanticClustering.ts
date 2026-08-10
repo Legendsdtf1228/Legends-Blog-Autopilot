@@ -6,6 +6,8 @@ import { createHash } from "node:crypto";
 import { jaccard } from "./cluster.js";
 import {
   DEFAULT_CLUSTERING_THRESHOLDS,
+  MERGE_AUDIENCE_FLOOR,
+  MERGE_DECISION_FLOOR,
   OPPORTUNITY_CLUSTER_SCHEMA_VERSION,
   SEMANTIC_CLUSTERING_VERSION,
   type ClusterConflictRecord,
@@ -271,6 +273,30 @@ export function detectHardConflicts(left: ReaderTask, right: ReaderTask): string
   return [...new Set(reasons)];
 }
 
+/**
+ * Declared pairwise decision policy — the only automatic-merge gate.
+ * score in [reviewMin, mergeMin) → review/separate, never merge.
+ */
+export function resolvePairDecision(args: {
+  score: number;
+  audience: number;
+  decisionSimilarity: number;
+  hardConflicts: string[];
+  thresholds?: ClusteringThresholds;
+}): SemanticComparisonResult["decision"] {
+  const thresholds = args.thresholds ?? DEFAULT_CLUSTERING_THRESHOLDS;
+  if (args.hardConflicts.length) return "separate";
+  if (
+    args.score >= thresholds.mergeMin &&
+    args.decisionSimilarity >= MERGE_DECISION_FLOOR &&
+    args.audience >= MERGE_AUDIENCE_FLOOR
+  ) {
+    return "merge";
+  }
+  if (args.score >= thresholds.reviewMin) return "review";
+  return "separate";
+}
+
 export function compareReaderTasksSemantically(
   left: ReaderTask,
   right: ReaderTask,
@@ -344,29 +370,16 @@ export function compareReaderTasksSemantically(
     softConflicts.push("same audience but weak decision alignment");
   }
 
-  let decision: SemanticComparisonResult["decision"] = "separate";
-  if (hardConflicts.length) {
-    decision = "separate";
-  } else if (score >= thresholds.mergeMin && signals.decision >= 0.55 && signals.audience >= 0.45) {
-    decision = "merge";
-  } else if (
-    // Strong shared decision family + audience can merge slightly below mergeMin when geography is soft-only.
-    score >= thresholds.reviewMin &&
-    signals.audience >= 0.9 &&
-    signals.decision >= 0.7 &&
-    fa.decisionFamily === fb.decisionFamily &&
-    fa.decisionFamily !== "other" &&
-    !hardConflicts.length
-  ) {
-    decision = "merge";
-  } else if (score >= thresholds.reviewMin) {
-    decision = "review";
-  } else {
-    decision = "separate";
-  }
+  let decision: SemanticComparisonResult["decision"] = resolvePairDecision({
+    score,
+    audience: signals.audience,
+    decisionSimilarity: signals.decision,
+    hardConflicts,
+    thresholds
+  });
 
   // Keyword-only near-duplicates without decision/audience alignment cannot auto-merge.
-  if (decision === "merge" && keywordOverlap >= 0.7 && signals.decision < 0.5) {
+  if (decision === "merge" && keywordOverlap >= 0.7 && signals.decision < MERGE_DECISION_FLOOR) {
     decision = "review";
     softConflicts.push("high keyword overlap without decision alignment");
   }
@@ -455,13 +468,30 @@ function specificityScore(task: ReaderTask): number {
   return Math.min(tokens.size, 24);
 }
 
+/** Demand used for ranking — unsupported claims do not count as verified/observed. */
+export function justifiedDemandStatus(
+  item: ClusterableReaderTask
+): ReaderTask["demandEvidence"]["status"] {
+  if (item.inactive || item.task.freshness === "stale") {
+    return item.task.demandEvidence.status === "inferred_seed" ? "inferred_seed" : "unavailable";
+  }
+  if (!item.hasActiveApprovedEvidence) {
+    return item.task.demandEvidence.status === "inferred_seed" ? "inferred_seed" : "unavailable";
+  }
+  const status = item.task.demandEvidence.status;
+  if (status === "verified" || status === "observed") return status;
+  if (status === "inferred_seed") return "inferred_seed";
+  return "unavailable";
+}
+
 export function scoreCanonicalCandidate(
   item: ClusterableReaderTask
 ): { score: number; breakdown: Record<string, number> } {
   const task = item.task;
+  const justified = justifiedDemandStatus(item);
   const breakdown = {
-    demand: demandRank(task.demandEvidence.status) * 1000,
-    approvedEvidence: item.hasActiveApprovedEvidence ? 200 : 0,
+    demand: demandRank(justified) * 1000,
+    approvedEvidence: item.hasActiveApprovedEvidence && !item.inactive && task.freshness !== "stale" ? 200 : 0,
     freshness: freshnessRank(task.freshness),
     confidence: confidenceRank(task.confidence),
     completeness: completenessScore(task),
@@ -542,42 +572,102 @@ export function buildClusterId(memberFingerprints: string[], clusteringVersion =
     .slice(0, 24);
 }
 
-class UnionFind {
-  private parent = new Map<string, string>();
-  ensure(id: string): void {
-    if (!this.parent.has(id)) this.parent.set(id, id);
-  }
-  find(id: string): string {
-    this.ensure(id);
-    const p = this.parent.get(id)!;
-    if (p !== id) {
-      const root = this.find(p);
-      this.parent.set(id, root);
-      return root;
+function pairKey(a: string, b: string): string {
+  return a < b ? `${a}::${b}` : `${b}::${a}`;
+}
+
+/**
+ * Complete-link compatibility: every cross-pair between components must be merge-eligible.
+ * Hard conflicts, review, or separate relationships block automatic component joins.
+ */
+export function componentsAreMergeCompatible(
+  leftIds: string[],
+  rightIds: string[],
+  cmpByPair: Map<string, SemanticComparisonResult>
+): { ok: boolean; blocking: SemanticComparisonResult[] } {
+  const blocking: SemanticComparisonResult[] = [];
+  for (const a of leftIds) {
+    for (const b of rightIds) {
+      const cmp = cmpByPair.get(pairKey(a, b));
+      if (!cmp) {
+        blocking.push({
+          leftTaskId: a,
+          rightTaskId: b,
+          score: 0,
+          keywordOverlap: 0,
+          hardConflicts: ["missing pairwise comparison"],
+          softConflicts: [],
+          signals: {},
+          decision: "separate",
+          explanation: "missing pairwise comparison"
+        });
+        continue;
+      }
+      if (cmp.decision !== "merge") blocking.push(cmp);
     }
-    return id;
   }
-  union(a: string, b: string): void {
-    const ra = this.find(a);
-    const rb = this.find(b);
-    if (ra === rb) return;
-    // Deterministic: lexicographically smaller root wins.
-    if (ra < rb) this.parent.set(rb, ra);
-    else this.parent.set(ra, rb);
-  }
-  components(ids: string[]): Map<string, string[]> {
-    const map = new Map<string, string[]>();
-    for (const id of [...ids].sort()) {
-      const root = this.find(id);
-      const list = map.get(root) || [];
-      list.push(id);
-      map.set(root, list);
+  return { ok: blocking.length === 0, blocking };
+}
+
+/** Every pair inside an automatic multi-task cluster must be merge-eligible. */
+export function clusterSatisfiesCompleteLinkInvariant(
+  memberIds: string[],
+  cmpByPair: Map<string, SemanticComparisonResult>
+): boolean {
+  for (let i = 0; i < memberIds.length; i++) {
+    for (let j = i + 1; j < memberIds.length; j++) {
+      const cmp = cmpByPair.get(pairKey(memberIds[i]!, memberIds[j]!));
+      if (!cmp || cmp.decision !== "merge" || cmp.hardConflicts.length) return false;
     }
-    for (const [k, list] of map) {
-      map.set(k, [...list].sort());
-    }
-    return map;
   }
+  return true;
+}
+
+/**
+ * Greedy complete-link agglomeration. Merge edges processed by score desc, then IDs.
+ * Components join only when every cross-pair is merge-eligible.
+ */
+export function agglomerateCompleteLink(
+  taskIds: string[],
+  cmpByPair: Map<string, SemanticComparisonResult>,
+  onBlocked?: (blocking: SemanticComparisonResult[]) => void
+): string[][] {
+  const components: string[][] = [...taskIds].sort((a, b) => a.localeCompare(b)).map(id => [id]);
+  const findComponentIndex = (id: string): number => components.findIndex(c => c.includes(id));
+
+  const mergeEdges = [...cmpByPair.values()]
+    .filter(c => c.decision === "merge")
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const aMin = a.leftTaskId < a.rightTaskId ? a.leftTaskId : a.rightTaskId;
+      const aMax = a.leftTaskId < a.rightTaskId ? a.rightTaskId : a.leftTaskId;
+      const bMin = b.leftTaskId < b.rightTaskId ? b.leftTaskId : b.rightTaskId;
+      const bMax = b.leftTaskId < b.rightTaskId ? b.rightTaskId : b.leftTaskId;
+      if (aMin !== bMin) return aMin.localeCompare(bMin);
+      return aMax.localeCompare(bMax);
+    });
+
+  for (const edge of mergeEdges) {
+    const i = findComponentIndex(edge.leftTaskId);
+    const j = findComponentIndex(edge.rightTaskId);
+    if (i < 0 || j < 0 || i === j) continue;
+    const leftComp = components[i]!;
+    const rightComp = components[j]!;
+    const compat = componentsAreMergeCompatible(leftComp, rightComp, cmpByPair);
+    if (!compat.ok) {
+      onBlocked?.(compat.blocking);
+      continue;
+    }
+    const merged = [...leftComp, ...rightComp].sort((a, b) => a.localeCompare(b));
+    const keep = Math.min(i, j);
+    const drop = Math.max(i, j);
+    components[keep] = merged;
+    components.splice(drop, 1);
+  }
+
+  return components
+    .map(c => [...c].sort((a, b) => a.localeCompare(b)))
+    .sort((a, b) => a[0]!.localeCompare(b[0]!));
 }
 
 export interface SemanticClusteringResult {
@@ -591,8 +681,9 @@ export interface SemanticClusteringResult {
 }
 
 /**
- * Pure deterministic clustering. Same active tasks + version → same clusters/canonicals.
- * Input order does not matter.
+ * Pure deterministic clustering with complete-link constraints.
+ * Same active tasks + version → same clusters/canonicals regardless of input order.
+ * Bridge tasks cannot transitively merge hard-conflict or review-only pairs.
  */
 export function clusterReaderTasksSemantically(
   inputs: ClusterableReaderTask[],
@@ -613,10 +704,9 @@ export function clusterReaderTasksSemantically(
     .sort((a, b) => a.task.id.localeCompare(b.task.id));
 
   const comparisons: SemanticComparisonResult[] = [];
+  const cmpByPair = new Map<string, SemanticComparisonResult>();
   const reviewCandidates: ClusterReviewCandidate[] = [];
   const conflictPairs: ClusterConflictRecord[] = [];
-  const uf = new UnionFind();
-  for (const item of active) uf.ensure(item.task.id);
 
   for (let i = 0; i < active.length; i++) {
     for (let j = i + 1; j < active.length; j++) {
@@ -624,6 +714,7 @@ export function clusterReaderTasksSemantically(
       const right = active[j]!.task;
       const cmp = compareReaderTasksSemantically(left, right, thresholds);
       comparisons.push(cmp);
+      cmpByPair.set(pairKey(left.id, right.id), cmp);
       if (cmp.hardConflicts.length) {
         conflictPairs.push({
           leftTaskId: left.id,
@@ -631,9 +722,7 @@ export function clusterReaderTasksSemantically(
           reasons: cmp.hardConflicts
         });
       }
-      if (cmp.decision === "merge") {
-        uf.union(left.id, right.id);
-      } else if (cmp.decision === "review") {
+      if (cmp.decision === "review") {
         reviewCandidates.push({
           leftTaskId: left.id,
           rightTaskId: right.id,
@@ -645,7 +734,31 @@ export function clusterReaderTasksSemantically(
     }
   }
 
-  // Sort comparisons for stable output.
+  const components = agglomerateCompleteLink(
+    active.map(a => a.task.id),
+    cmpByPair,
+    blocking => {
+      for (const blocked of blocking) {
+        if (blocked.decision === "review") {
+          const exists = reviewCandidates.some(
+            r =>
+              (r.leftTaskId === blocked.leftTaskId && r.rightTaskId === blocked.rightTaskId) ||
+              (r.leftTaskId === blocked.rightTaskId && r.rightTaskId === blocked.leftTaskId)
+          );
+          if (!exists) {
+            reviewCandidates.push({
+              leftTaskId: blocked.leftTaskId,
+              rightTaskId: blocked.rightTaskId,
+              similarityScore: blocked.score,
+              explanation: `${blocked.explanation}; bridge merge blocked by complete-link policy`,
+              reasons: [...blocked.softConflicts, "bridge merge blocked — ambiguous pair"]
+            });
+          }
+        }
+      }
+    }
+  );
+
   comparisons.sort((a, b) =>
     a.leftTaskId === b.leftTaskId
       ? a.rightTaskId.localeCompare(b.rightTaskId)
@@ -662,85 +775,18 @@ export function clusterReaderTasksSemantically(
       : a.leftTaskId.localeCompare(b.leftTaskId)
   );
 
-  const components = uf.components(active.map(a => a.task.id));
   const clusters: OpportunityCluster[] = [];
 
-  for (const memberIds of [...components.values()].sort((a, b) => a[0]!.localeCompare(b[0]!))) {
-    const members = memberIds.map(id => byId.get(id)!);
-    const canonical = selectCanonicalReaderTask(members);
-    const fingerprints = members.map(m => m.task.semanticFingerprint);
-    const id = buildClusterId(fingerprints);
-    const evidenceIds = [...new Set(members.flatMap(m => m.supportingSourceEvidenceIds))].sort();
-
-    const pairExplanations: string[] = [];
-    let minPairScore = 1;
-    for (let i = 0; i < members.length; i++) {
-      for (let j = i + 1; j < members.length; j++) {
-        const cmp = compareReaderTasksSemantically(members[i]!.task, members[j]!.task, thresholds);
-        pairExplanations.push(
-          `${members[i]!.task.id}~${members[j]!.task.id}: ${cmp.explanation}`
-        );
-        minPairScore = Math.min(minPairScore, cmp.score);
+  for (const memberIds of [...components].sort((a, b) => a[0]!.localeCompare(b[0]!))) {
+    // Safety: never emit an automatic multi-task cluster that violates complete-link.
+    if (memberIds.length > 1 && !clusterSatisfiesCompleteLinkInvariant(memberIds, cmpByPair)) {
+      for (const id of memberIds) {
+        const singleton = [id];
+        clusters.push(buildClusterFromMembers(singleton, byId, cmpByPair, thresholds, reviewCandidates, conflictPairs));
       }
+      continue;
     }
-    if (members.length === 1) minPairScore = 1;
-
-    const wordingVariants = [...new Set(members.map(m => m.task.actualQuestion.trim()))].sort();
-    const requiresManualReview = reviewCandidates.some(
-      r => memberIds.includes(r.leftTaskId) || memberIds.includes(r.rightTaskId)
-    );
-
-    const memberConflicts = conflictPairs.filter(
-      c => memberIds.includes(c.leftTaskId) && memberIds.includes(c.rightTaskId)
-    );
-
-    const mergedEvidenceSummary = members
-      .map(m => m.task.demandEvidence.summary)
-      .filter(Boolean)
-      .sort()
-      .join(" | ");
-
-    const base = {
-      id,
-      canonicalReaderTaskId: canonical.task.id,
-      semanticFingerprint: createHash("sha1")
-        .update([...fingerprints].sort().join("|"))
-        .digest("hex")
-        .slice(0, 24),
-      clusteringVersion: SEMANTIC_CLUSTERING_VERSION,
-      status: (requiresManualReview ? "needs_review" : "active") as OpportunityCluster["status"],
-      memberReaderTaskIds: memberIds,
-      supportingSourceEvidenceIds: evidenceIds,
-      canonicalAudience: canonical.task.audience,
-      canonicalSituation: canonical.task.situation,
-      canonicalProblem: canonical.task.problem,
-      canonicalQuestion: canonical.task.actualQuestion,
-      canonicalDecision: canonical.task.decisionOrAction,
-      canonicalIntent: canonical.task.searchIntent,
-      canonicalDesiredOutcome: canonical.task.desiredOutcome,
-      mergedEvidenceSummary: mergedEvidenceSummary || "No evidence summaries available.",
-      similarityExplanation:
-        members.length === 1
-          ? "Singleton cluster — no merge performed."
-          : pairExplanations.sort().join(" || "),
-      mergeConfidence: members.length === 1 ? 1 : Number(minPairScore.toFixed(4)),
-      requiresManualReview,
-      demandStatus: clusterDemandStatus(members),
-      confidence: clusterConfidence(members),
-      wordingVariants,
-      conflicts: memberConflicts,
-      schemaVersion: OPPORTUNITY_CLUSTER_SCHEMA_VERSION
-    };
-
-    const pipelineVersions = createPipelineVersionStamp("M3");
-    // Deterministic stamp time would break purity — strip stampedAt from material hash via helper.
-    const materialHash = materialClusterHash(base);
-
-    clusters.push({
-      ...base,
-      materialHash,
-      pipelineVersions
-    });
+    clusters.push(buildClusterFromMembers(memberIds, byId, cmpByPair, thresholds, reviewCandidates, conflictPairs));
   }
 
   clusters.sort((a, b) => a.id.localeCompare(b.id));
@@ -756,6 +802,91 @@ export function clusterReaderTasksSemantically(
     comparisons,
     unassignedTaskIds,
     inactiveTaskIds
+  };
+}
+
+function buildClusterFromMembers(
+  memberIds: string[],
+  byId: Map<string, ClusterableReaderTask>,
+  cmpByPair: Map<string, SemanticComparisonResult>,
+  thresholds: ClusteringThresholds,
+  reviewCandidates: ClusterReviewCandidate[],
+  conflictPairs: ClusterConflictRecord[]
+): OpportunityCluster {
+  const members = memberIds.map(id => byId.get(id)!);
+  const canonical = selectCanonicalReaderTask(members);
+  const fingerprints = members.map(m => m.task.semanticFingerprint);
+  const id = buildClusterId(fingerprints);
+  const evidenceIds = [...new Set(members.flatMap(m => m.supportingSourceEvidenceIds))].sort();
+
+  const pairExplanations: string[] = [];
+  let minPairScore = 1;
+  for (let i = 0; i < members.length; i++) {
+    for (let j = i + 1; j < members.length; j++) {
+      const cmp =
+        cmpByPair.get(pairKey(members[i]!.task.id, members[j]!.task.id)) ||
+        compareReaderTasksSemantically(members[i]!.task, members[j]!.task, thresholds);
+      pairExplanations.push(`${members[i]!.task.id}~${members[j]!.task.id}: ${cmp.explanation}`);
+      minPairScore = Math.min(minPairScore, cmp.score);
+    }
+  }
+  if (members.length === 1) minPairScore = 1;
+
+  const wordingVariants = [...new Set(members.map(m => m.task.actualQuestion.trim()))].sort();
+  // Multi-task automatic clusters are complete-link merge-only; review flag is for singleton peers.
+  const requiresManualReview =
+    members.length === 1 &&
+    reviewCandidates.some(r => memberIds.includes(r.leftTaskId) || memberIds.includes(r.rightTaskId));
+
+  const memberConflicts = conflictPairs.filter(
+    c => memberIds.includes(c.leftTaskId) && memberIds.includes(c.rightTaskId)
+  );
+
+  const mergedEvidenceSummary = members
+    .map(m => m.task.demandEvidence.summary)
+    .filter(Boolean)
+    .sort()
+    .join(" | ");
+
+  const base = {
+    id,
+    canonicalReaderTaskId: canonical.task.id,
+    semanticFingerprint: createHash("sha1")
+      .update([...fingerprints].sort().join("|"))
+      .digest("hex")
+      .slice(0, 24),
+    clusteringVersion: SEMANTIC_CLUSTERING_VERSION,
+    status: (requiresManualReview ? "needs_review" : "active") as OpportunityCluster["status"],
+    memberReaderTaskIds: [...memberIds].sort(),
+    supportingSourceEvidenceIds: evidenceIds,
+    canonicalAudience: canonical.task.audience,
+    canonicalSituation: canonical.task.situation,
+    canonicalProblem: canonical.task.problem,
+    canonicalQuestion: canonical.task.actualQuestion,
+    canonicalDecision: canonical.task.decisionOrAction,
+    canonicalIntent: canonical.task.searchIntent,
+    canonicalDesiredOutcome: canonical.task.desiredOutcome,
+    mergedEvidenceSummary: mergedEvidenceSummary || "No evidence summaries available.",
+    similarityExplanation:
+      members.length === 1
+        ? "Singleton cluster — no merge performed."
+        : pairExplanations.sort().join(" || "),
+    mergeConfidence: members.length === 1 ? 1 : Number(minPairScore.toFixed(4)),
+    requiresManualReview,
+    demandStatus: clusterDemandStatus(members),
+    confidence: clusterConfidence(members),
+    wordingVariants,
+    conflicts: memberConflicts,
+    schemaVersion: OPPORTUNITY_CLUSTER_SCHEMA_VERSION
+  };
+
+  const pipelineVersions = createPipelineVersionStamp("M3");
+  const materialHash = materialClusterHash(base);
+
+  return {
+    ...base,
+    materialHash,
+    pipelineVersions
   };
 }
 

@@ -234,6 +234,7 @@ export async function persistSemanticClustering(
     for (const cluster of result.clusters) {
       const existing = existingById.get(cluster.id);
       if (existing && existing.material_hash === cluster.materialHash && (existing.status === "active" || existing.status === "needs_review")) {
+        // Materially identical: no membership rewrite, evidence churn, history, or timestamp update.
         unchanged += 1;
         continue;
       }
@@ -410,7 +411,7 @@ export async function persistSemanticClustering(
           [
             memberId,
             cluster.id,
-            existing && existing.material_hash === cluster.materialHash ? "RETAIN" : "ASSIGN",
+            "ASSIGN",
             isCanonical,
             cluster.clusteringVersion,
             JSON.stringify({ joinReason })
@@ -418,7 +419,7 @@ export async function persistSemanticClustering(
         );
       }
 
-      // Evidence links
+      // Evidence links — only rewritten on insert/update paths (not unchanged).
       await client.query(`DELETE FROM opportunity_cluster_evidence WHERE cluster_id=$1`, [cluster.id]);
       for (const evidenceId of cluster.supportingSourceEvidenceIds) {
         await client.query(
@@ -429,25 +430,54 @@ export async function persistSemanticClustering(
       }
     }
 
-    // Persist review candidates for admin visibility.
-    await client.query(`DELETE FROM opportunity_cluster_review_candidates WHERE clustering_version=$1`, [
-      result.clusteringVersion
-    ]);
-    for (const review of result.reviewCandidates) {
-      await client.query(
-        `INSERT INTO opportunity_cluster_review_candidates(
-           left_reader_task_id, right_reader_task_id, similarity_score,
-           explanation, reasons, clustering_version
-         ) VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
-        [
-          review.leftTaskId,
-          review.rightTaskId,
-          review.similarityScore,
-          review.explanation,
-          JSON.stringify(review.reasons),
-          result.clusteringVersion
-        ]
-      );
+    // Review candidates: replace only when the candidate set changed (avoid churn on identical retries).
+    const { rows: priorReviews } = await client.query<{
+      left_reader_task_id: string;
+      right_reader_task_id: string;
+      similarity_score: number;
+      explanation: string;
+    }>(
+      `SELECT left_reader_task_id, right_reader_task_id, similarity_score, explanation
+       FROM opportunity_cluster_review_candidates
+       WHERE clustering_version=$1
+       ORDER BY left_reader_task_id, right_reader_task_id`,
+      [result.clusteringVersion]
+    );
+    const nextReviewKey = (r: {
+      leftTaskId?: string;
+      rightTaskId?: string;
+      left_reader_task_id?: string;
+      right_reader_task_id?: string;
+      similarityScore?: number;
+      similarity_score?: number;
+      explanation: string;
+    }) =>
+      `${r.leftTaskId || r.left_reader_task_id}|${r.rightTaskId || r.right_reader_task_id}|${Number(r.similarityScore ?? r.similarity_score).toFixed(6)}|${r.explanation}`;
+    const priorKey = priorReviews.map(r => nextReviewKey(r)).join("\n");
+    const freshKey = result.reviewCandidates
+      .map(r => nextReviewKey(r))
+      .sort()
+      .join("\n");
+    if (priorKey !== freshKey) {
+      await client.query(`DELETE FROM opportunity_cluster_review_candidates WHERE clustering_version=$1`, [
+        result.clusteringVersion
+      ]);
+      for (const review of result.reviewCandidates) {
+        await client.query(
+          `INSERT INTO opportunity_cluster_review_candidates(
+             left_reader_task_id, right_reader_task_id, similarity_score,
+             explanation, reasons, clustering_version
+           ) VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
+          [
+            review.leftTaskId,
+            review.rightTaskId,
+            review.similarityScore,
+            review.explanation,
+            JSON.stringify(review.reasons),
+            result.clusteringVersion
+          ]
+        );
+      }
     }
 
     const { rows: runRows } = await client.query<{ id: string }>(

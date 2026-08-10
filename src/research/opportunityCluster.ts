@@ -89,6 +89,10 @@ export interface ClusteringThresholds {
   reviewMin: number;
 }
 
+/** Declared floors for automatic merge eligibility (in addition to mergeMin). */
+export const MERGE_AUDIENCE_FLOOR = 0.45;
+export const MERGE_DECISION_FLOOR = 0.55;
+
 export const DEFAULT_CLUSTERING_THRESHOLDS: ClusteringThresholds = {
   mergeMin: 0.78,
   reviewMin: 0.55
