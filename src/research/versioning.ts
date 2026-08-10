@@ -5,7 +5,7 @@
 export const PIPELINE_VERSIONS = {
   provider: "provider.v2.approved-faq-and-seed-brainstorm",
   normalization: "normalization.v1.source-evidence-to-reader-task",
-  clustering: "clustering.v0.jaccard-keyword",
+  clustering: "clustering.v1.semantic-reader-task",
   titleGeneration: "title.v0.template-and-refinement",
   decisionPolicy: "decision.v1.auto-only-generation",
   briefSchema: "brief.v1.opportunity-copy",

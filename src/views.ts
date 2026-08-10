@@ -536,6 +536,32 @@ export function researchPage(args: {
     rejectedNormalizationCount: number;
     recentRejectionReasons: Array<{ reason: string; count: number }>;
   } | null;
+  clusterHealth?: {
+    clusteringVersion: string;
+    activeClusterCount: number;
+    singletonClusterCount: number;
+    multiTaskClusterCount: number;
+    needsReviewClusterCount: number;
+    reviewCandidateCount: number;
+    conflictPairCount: number;
+    unassignedTaskCount: number;
+    lastClusteringRunAt: string | null;
+    lastClusteringRun: {
+      inserted: number;
+      updated: number;
+      unchanged: number;
+      superseded: number;
+    } | null;
+    sampleClusters: Array<{
+      id: string;
+      status: string;
+      memberCount: number;
+      canonicalReaderTaskId: string;
+      mergeConfidence: number;
+      requiresManualReview: boolean;
+      similarityExplanation: string;
+    }>;
+  } | null;
 }) {
   const missing = args.cycle?.missingProviders?.length
     ? `<div class="notice">${args.cycle.missingProviders.map(m => `<div><strong>${esc(m.provider)}</strong>: ${esc(m.reason)}</div>`).join("")}</div>`
@@ -572,6 +598,42 @@ export function researchPage(args: {
         <form method="post" action="/research/ingest-sources" class="actions" style="margin-top:0.75rem">
           <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
           <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Ingest approved sources</button>
+        </form>
+      </section>`
+    : "";
+
+  const clusterHealth = args.clusterHealth;
+  const clusterHealthCard = clusterHealth
+    ? `<section class="card">
+        <h3>ReaderTask clusters (M3)</h3>
+        <p class="muted">Semantic clustering by shared reader decision. Does not create opportunities or change generation. Version: ${esc(clusterHealth.clusteringVersion)}</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(clusterHealth.activeClusterCount))}</strong> active clusters</div>
+          <div><strong>${esc(String(clusterHealth.singletonClusterCount))}</strong> singletons</div>
+          <div><strong>${esc(String(clusterHealth.multiTaskClusterCount))}</strong> multi-task</div>
+          <div><strong>${esc(String(clusterHealth.reviewCandidateCount))}</strong> possible duplicates for review</div>
+          <div><strong>${esc(String(clusterHealth.conflictPairCount))}</strong> conflict pairs</div>
+          <div><strong>${esc(String(clusterHealth.unassignedTaskCount))}</strong> unassigned tasks</div>
+        </div>
+        ${clusterHealth.lastClusteringRunAt
+          ? `<p class="muted">Last run ${esc(new Date(clusterHealth.lastClusteringRunAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}
+              · inserted ${esc(String(clusterHealth.lastClusteringRun?.inserted ?? 0))}
+              / updated ${esc(String(clusterHealth.lastClusteringRun?.updated ?? 0))}
+              / unchanged ${esc(String(clusterHealth.lastClusteringRun?.unchanged ?? 0))}
+              / superseded ${esc(String(clusterHealth.lastClusteringRun?.superseded ?? 0))}</p>`
+          : `<p class="muted">No clustering runs yet.</p>`}
+        <h4>Cluster traces (sample)</h4>
+        <ul>${clusterHealth.sampleClusters.length
+          ? clusterHealth.sampleClusters.map(c =>
+              `<li><strong>${esc(c.id)}</strong> · ${esc(String(c.memberCount))} member(s) · canonical ${esc(c.canonicalReaderTaskId)}
+                · confidence ${esc(String(c.mergeConfidence))}
+                ${c.requiresManualReview ? " · <em>needs review</em>" : ""}
+                <div class="muted">${esc(c.similarityExplanation.slice(0, 240))}${c.similarityExplanation.length > 240 ? "…" : ""}</div></li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <form method="post" action="/research/cluster-reader-tasks" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Run semantic clustering</button>
         </form>
       </section>`
     : "";
@@ -635,6 +697,7 @@ export function researchPage(args: {
     ${missing}
   </section>
   ${sourceHealthCard}
+  ${clusterHealthCard}
   ${failureSummary}
   <section class="card">
     <h3>Approved content pillars</h3>

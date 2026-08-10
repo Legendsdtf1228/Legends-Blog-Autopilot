@@ -445,6 +445,115 @@ export async function migrate(db: Db): Promise<void> {
       "CREATE INDEX IF NOT EXISTS evidence_approval_audits_evidence_idx ON evidence_approval_audits(source_evidence_id, created_at DESC)"
     );
 
+    // M3: semantic ReaderTask clustering (additive; does not create opportunities)
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_clusters (
+      id text PRIMARY KEY,
+      canonical_reader_task_id text NOT NULL,
+      semantic_fingerprint text NOT NULL,
+      clustering_version text NOT NULL,
+      status text NOT NULL
+        CHECK (status IN ('active','needs_review','superseded','split','merged_away')),
+      canonical_audience text NOT NULL,
+      canonical_situation text NOT NULL,
+      canonical_problem text NOT NULL,
+      canonical_question text NOT NULL,
+      canonical_decision text NOT NULL,
+      canonical_intent text NOT NULL,
+      canonical_desired_outcome text NOT NULL,
+      merged_evidence_summary text NOT NULL DEFAULT '',
+      similarity_explanation text NOT NULL DEFAULT '',
+      merge_confidence double precision NOT NULL DEFAULT 0,
+      requires_manual_review boolean NOT NULL DEFAULT false,
+      demand_status text NOT NULL DEFAULT 'unavailable',
+      confidence text NOT NULL DEFAULT 'unknown',
+      wording_variants jsonb NOT NULL DEFAULT '[]'::jsonb,
+      conflicts jsonb NOT NULL DEFAULT '[]'::jsonb,
+      supporting_evidence_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+      payload jsonb NOT NULL,
+      material_hash text NOT NULL,
+      schema_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_clusters_status_idx ON opportunity_clusters(status, updated_at DESC)");
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_clusters_canonical_idx ON opportunity_clusters(canonical_reader_task_id)");
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_clusters_version_idx ON opportunity_clusters(clustering_version)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_members (
+      cluster_id text NOT NULL REFERENCES opportunity_clusters(id) ON DELETE CASCADE,
+      reader_task_id text NOT NULL REFERENCES reader_tasks(id) ON DELETE CASCADE,
+      semantic_fingerprint text NOT NULL DEFAULT '',
+      join_reason text NOT NULL DEFAULT '',
+      is_canonical boolean NOT NULL DEFAULT false,
+      active boolean NOT NULL DEFAULT true,
+      clustering_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      left_at timestamptz,
+      PRIMARY KEY (cluster_id, reader_task_id)
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_cluster_members_task_idx ON opportunity_cluster_members(reader_task_id, active)");
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_cluster_members_active_idx ON opportunity_cluster_members(cluster_id, active)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_evidence (
+      cluster_id text NOT NULL REFERENCES opportunity_clusters(id) ON DELETE CASCADE,
+      source_evidence_id text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (cluster_id, source_evidence_id)
+    )`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_audits (
+      id bigserial PRIMARY KEY,
+      cluster_id text NOT NULL REFERENCES opportunity_clusters(id) ON DELETE CASCADE,
+      action text NOT NULL,
+      actor text NOT NULL,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_cluster_audits_cluster_idx ON opportunity_cluster_audits(cluster_id, created_at ASC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS reader_task_cluster_history (
+      id bigserial PRIMARY KEY,
+      reader_task_id text NOT NULL REFERENCES reader_tasks(id) ON DELETE CASCADE,
+      cluster_id text NOT NULL,
+      action text NOT NULL,
+      is_canonical boolean NOT NULL DEFAULT false,
+      clustering_version text NOT NULL,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS reader_task_cluster_history_task_idx ON reader_task_cluster_history(reader_task_id, created_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_review_candidates (
+      id bigserial PRIMARY KEY,
+      left_reader_task_id text NOT NULL,
+      right_reader_task_id text NOT NULL,
+      similarity_score double precision NOT NULL,
+      explanation text NOT NULL,
+      reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+      clustering_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (left_reader_task_id, right_reader_task_id, clustering_version)
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS opportunity_cluster_review_version_idx ON opportunity_cluster_review_candidates(clustering_version)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS clustering_runs (
+      id bigserial PRIMARY KEY,
+      clustering_version text NOT NULL,
+      inserted_count integer NOT NULL DEFAULT 0,
+      updated_count integer NOT NULL DEFAULT 0,
+      unchanged_count integer NOT NULL DEFAULT 0,
+      superseded_count integer NOT NULL DEFAULT 0,
+      active_cluster_count integer NOT NULL DEFAULT 0,
+      review_candidate_count integer NOT NULL DEFAULT 0,
+      conflict_pair_count integer NOT NULL DEFAULT 0,
+      unassigned_task_count integer NOT NULL DEFAULT 0,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS clustering_runs_created_idx ON clustering_runs(created_at DESC)");
+
     await client.query(`CREATE TABLE IF NOT EXISTS pillar_usage (
       id bigserial PRIMARY KEY,
       pillar text NOT NULL,
@@ -509,7 +618,7 @@ export async function migrate(db: Db): Promise<void> {
         ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research'),
         ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim'),
         ('007_rollout_draft_counted_unique'), ('008_source_evidence_reader_tasks'),
-        ('009_evidence_approval_authority')
+        ('009_evidence_approval_authority'), ('010_opportunity_clusters')
        ON CONFLICT DO NOTHING`
     );
 

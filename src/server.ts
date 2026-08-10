@@ -91,7 +91,9 @@ import {
   saveResearchCycle,
   storeApprovedInterviewKnowledge,
   getSourceIngestionHealth,
+  getClusterHealth,
   runSourceEvidenceIngestion,
+  runSemanticReaderTaskClustering,
   updateBrief
 } from "./research/index.js";
 
@@ -340,10 +342,11 @@ app.get("/", async (req: AuthedRequest, res) => {
 // ---- Topic research ----
 app.get("/research", async (req: AuthedRequest, res) => {
   const settings = await getSettings(db);
-  const [cycle, opportunities, sourceHealth] = await Promise.all([
+  const [cycle, opportunities, sourceHealth, clusterHealth] = await Promise.all([
     latestCycleMeta(db),
     listOpportunities(db, 40),
-    getSourceIngestionHealth(db).catch(() => null)
+    getSourceIngestionHealth(db).catch(() => null),
+    getClusterHealth(db).catch(() => null)
   ]);
   res.send(layout({
     active: "/research",
@@ -358,9 +361,30 @@ app.get("/research", async (req: AuthedRequest, res) => {
       cycle,
       opportunities,
       pillars: CONTENT_PILLARS,
-      sourceHealth
+      sourceHealth,
+      clusterHealth
     })
   }));
+});
+
+app.post("/research/cluster-reader-tasks", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await runSemanticReaderTaskClustering(db, `admin:${req.auth?.user || "merchant"}`);
+    const notice =
+      `Semantic clustering complete: ${result.activeClusterCount} active cluster(s), ` +
+      `${result.reviewCandidateCount} review candidate(s), ` +
+      `${result.inserted} inserted / ${result.updated} updated / ${result.unchanged} unchanged / ${result.superseded} superseded. ` +
+      `No opportunities created.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Clustering failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
 });
 
 app.post("/research/ingest-sources", async (req: AuthedRequest, res) => {
