@@ -562,6 +562,29 @@ export function researchPage(args: {
       similarityExplanation: string;
     }>;
   } | null;
+  knowledgeHealth?: {
+    evaluationVersion: string;
+    approvedKnowledgeCount: number;
+    pendingApprovalCount: number;
+    rejectedRevokedInvalidatedStaleCount: number;
+    knowledgeByClass: Array<{ knowledgeClass: string; count: number }>;
+    knowledgeBySourceType: Array<{ sourceType: string; count: number }>;
+    clustersWithBudgets: number;
+    clustersMissingMerchantKnowledge: number;
+    clustersMissingTechnicalEvidence: number;
+    contradictionClaimCount: number;
+    staleClaimCount: number;
+    interviewPacketCount: number;
+    openInterviewPacketCount: number;
+    sampleClaimTraces: Array<{
+      clusterId: string;
+      claimId: string;
+      claimClass: string;
+      supportStatus: string;
+      trace: string;
+    }>;
+    lastEvaluationRunAt: string | null;
+  } | null;
 }) {
   const missing = args.cycle?.missingProviders?.length
     ? `<div class="notice">${args.cycle.missingProviders.map(m => `<div><strong>${esc(m.provider)}</strong>: ${esc(m.reason)}</div>`).join("")}</div>`
@@ -638,6 +661,51 @@ export function researchPage(args: {
       </section>`
     : "";
 
+  const knowledgeHealth = args.knowledgeHealth;
+  const knowledgeHealthCard = knowledgeHealth
+    ? `<section class="card">
+        <h3>Knowledge registry (M4)</h3>
+        <p class="muted">Approved knowledge and claim-level evidence budgets for ReaderTask clusters. Does not generate titles, briefs, or articles. Does not assign AUTO_ELIGIBLE. Version: ${esc(knowledgeHealth.evaluationVersion)}</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(knowledgeHealth.approvedKnowledgeCount))}</strong> approved knowledge</div>
+          <div><strong>${esc(String(knowledgeHealth.pendingApprovalCount))}</strong> pending approval</div>
+          <div><strong>${esc(String(knowledgeHealth.rejectedRevokedInvalidatedStaleCount))}</strong> rejected/revoked/invalidated/stale</div>
+          <div><strong>${esc(String(knowledgeHealth.clustersWithBudgets))}</strong> clusters with evidence budgets</div>
+          <div><strong>${esc(String(knowledgeHealth.clustersMissingMerchantKnowledge))}</strong> missing merchant knowledge</div>
+          <div><strong>${esc(String(knowledgeHealth.clustersMissingTechnicalEvidence))}</strong> missing technical evidence</div>
+          <div><strong>${esc(String(knowledgeHealth.contradictionClaimCount))}</strong> conflicting claims</div>
+          <div><strong>${esc(String(knowledgeHealth.staleClaimCount))}</strong> stale claims</div>
+          <div><strong>${esc(String(knowledgeHealth.openInterviewPacketCount))}</strong> open interview packets · ${esc(String(knowledgeHealth.interviewPacketCount))} total</div>
+        </div>
+        ${knowledgeHealth.lastEvaluationRunAt
+          ? `<p class="muted">Last evaluation ${esc(new Date(knowledgeHealth.lastEvaluationRunAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>`
+          : `<p class="muted">No knowledge evaluations yet.</p>`}
+        <h4>Knowledge by class</h4>
+        <ul>${knowledgeHealth.knowledgeByClass.length
+          ? knowledgeHealth.knowledgeByClass.map(k =>
+              `<li>${esc(k.knowledgeClass)}: ${esc(String(k.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Knowledge by source type</h4>
+        <ul>${knowledgeHealth.knowledgeBySourceType.length
+          ? knowledgeHealth.knowledgeBySourceType.map(k =>
+              `<li>${esc(k.sourceType)}: ${esc(String(k.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Claim-level traces (sample)</h4>
+        <ul>${knowledgeHealth.sampleClaimTraces.length
+          ? knowledgeHealth.sampleClaimTraces.map(t =>
+              `<li><strong>${esc(t.claimClass)}</strong> · ${esc(t.supportStatus)}
+                <div class="muted">${esc(t.trace.slice(0, 320))}${t.trace.length > 320 ? "…" : ""}</div></li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <form method="post" action="/research/evaluate-knowledge" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Evaluate cluster evidence budgets</button>
+        </form>
+      </section>`
+    : "";
+
   const failureSummary = (() => {
     const counts = new Map<string, number>();
     for (const o of args.opportunities) {
@@ -698,6 +766,7 @@ export function researchPage(args: {
   </section>
   ${sourceHealthCard}
   ${clusterHealthCard}
+  ${knowledgeHealthCard}
   ${failureSummary}
   <section class="card">
     <h3>Approved content pillars</h3>

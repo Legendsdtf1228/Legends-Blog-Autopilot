@@ -92,6 +92,8 @@ import {
   storeApprovedInterviewKnowledge,
   getSourceIngestionHealth,
   getClusterHealth,
+  getKnowledgeRegistryHealth,
+  evaluateAndPersistAllActiveClusters,
   runSourceEvidenceIngestion,
   runSemanticReaderTaskClustering,
   updateBrief
@@ -342,11 +344,12 @@ app.get("/", async (req: AuthedRequest, res) => {
 // ---- Topic research ----
 app.get("/research", async (req: AuthedRequest, res) => {
   const settings = await getSettings(db);
-  const [cycle, opportunities, sourceHealth, clusterHealth] = await Promise.all([
+  const [cycle, opportunities, sourceHealth, clusterHealth, knowledgeHealth] = await Promise.all([
     latestCycleMeta(db),
     listOpportunities(db, 40),
     getSourceIngestionHealth(db).catch(() => null),
-    getClusterHealth(db).catch(() => null)
+    getClusterHealth(db).catch(() => null),
+    getKnowledgeRegistryHealth(db).catch(() => null)
   ]);
   res.send(layout({
     active: "/research",
@@ -362,7 +365,8 @@ app.get("/research", async (req: AuthedRequest, res) => {
       opportunities,
       pillars: CONTENT_PILLARS,
       sourceHealth,
-      clusterHealth
+      clusterHealth,
+      knowledgeHealth
     })
   }));
 });
@@ -383,6 +387,28 @@ app.post("/research/cluster-reader-tasks", async (req: AuthedRequest, res) => {
     res.redirect("/research?notice=" + encodeURIComponent(notice));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Clustering failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
+});
+
+app.post("/research/evaluate-knowledge", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await evaluateAndPersistAllActiveClusters(db, {
+      actor: `admin:${req.auth?.user || "ops"}`
+    });
+    const notice =
+      `Knowledge evaluation complete: ${result.budgets.length} cluster budget(s), ` +
+      `${result.packets.length} interview packet(s), ` +
+      `${result.persist.inserted} inserted / ${result.persist.updated} updated / ${result.persist.unchanged} unchanged. ` +
+      `No titles, briefs, or AUTO_ELIGIBLE decisions created.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Knowledge evaluation failed.";
     res.redirect("/research?error=" + encodeURIComponent(message));
   }
 });
