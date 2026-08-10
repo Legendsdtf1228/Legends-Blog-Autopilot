@@ -1,0 +1,40 @@
+/**
+ * Pipeline version pins for editorial artifacts.
+ * M1 foundation — stamp helpers available; mandatory stamping begins M2+.
+ */
+export const PIPELINE_VERSIONS = {
+  provider: "provider.v1.seed-shopify-stubs",
+  normalization: "normalization.v0.keyword-only",
+  clustering: "clustering.v0.jaccard-keyword",
+  titleGeneration: "title.v0.template-and-refinement",
+  decisionPolicy: "decision.v1.auto-only-generation",
+  briefSchema: "brief.v1.opportunity-copy",
+  generationPrompt: "generation.v1.writer-json",
+  verificationRubric: "verification.v1.quality-gates",
+  /** Bump when ReaderTask becomes source of truth (M2+). */
+  readerTaskSchema: "readerTask.v0.types-only"
+} as const;
+
+export type PipelineVersionKey = keyof typeof PIPELINE_VERSIONS;
+
+export interface PipelineVersionStamp {
+  stampedAt: string;
+  versions: typeof PIPELINE_VERSIONS;
+  /** Milestone that produced this stamp. */
+  milestone: string;
+}
+
+export function createPipelineVersionStamp(milestone = "M1"): PipelineVersionStamp {
+  return {
+    stampedAt: new Date().toISOString(),
+    versions: { ...PIPELINE_VERSIONS },
+    milestone
+  };
+}
+
+export function pipelineVersionSummary(stamp?: PipelineVersionStamp | null): string {
+  if (!stamp) return "unstamped";
+  return Object.entries(stamp.versions)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(";");
+}

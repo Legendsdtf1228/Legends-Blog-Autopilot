@@ -17,6 +17,8 @@ export * from "./salesLimits.js";
 export * from "./templateDetection.js";
 export * from "./editorialControls.js";
 export * from "./merchantKnowledge.js";
+export * from "./versioning.js";
+export * from "./readerTask.js";
 export * from "./quarantine.js";
 export * from "./productSelection.js";
 export * from "./overlap.js";
