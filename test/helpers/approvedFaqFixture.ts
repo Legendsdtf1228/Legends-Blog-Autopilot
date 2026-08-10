@@ -2,8 +2,8 @@
  * Shared builders for M2 approval trust-boundary tests.
  * Test-only identities — not production merchant evidence.
  */
-import { computeEvidenceContentHash } from "../src/research/evidenceApproval.js";
-import type { FaqImportRecord } from "../src/research/providers/approvedFaqImport.js";
+import { computeEvidenceContentHash } from "../../src/research/evidenceApproval.js";
+import type { FaqImportRecord } from "../../src/research/providers/approvedFaqImport.js";
 
 export function buildExplicitlyApprovedFaqRecord(
   overrides: Partial<FaqImportRecord> & { id: string }

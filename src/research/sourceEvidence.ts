@@ -87,7 +87,7 @@ export interface SourceEvidenceValidationResult {
 }
 
 const PII_PATTERN =
-  /\b([A-Z][a-z]+ [A-Z][a-z]+@|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|\+?\d[\d\s().-]{8,}\d)\b/i;
+  /\b([A-Z][a-z]+ [A-Z][a-z]+@|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|\+?\d[\d\s().-]*[()\s.-][\d\s().-]*\d)\b/i;
 
 export function isSeedBrainstormEvidence(evidence: Pick<SourceEvidence, "sourceType" | "provenance">): boolean {
   return evidence.sourceType === "seed_brainstorm" || evidence.provenance.brainstormOnly === true;
@@ -186,14 +186,13 @@ export function computeFreshness(periodEnd: string | null, now = new Date()): So
   return "stale";
 }
 
-/** Material content fingerprint for idempotent upsert accounting. */
+/** Material content fingerprint for idempotent upsert accounting (excludes collection timestamp). */
 export function materialEvidenceFingerprint(row: SourceEvidence): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
         providerVersion: row.providerVersion,
         sourceType: row.sourceType,
-        collectedAt: row.collectedAt,
         periodStart: row.periodStart,
         periodEnd: row.periodEnd,
         geographicRelevance: row.geographicRelevance,
@@ -203,7 +202,11 @@ export function materialEvidenceFingerprint(row: SourceEvidence): string {
         metrics: row.metrics || {},
         confidence: row.confidence,
         freshness: row.freshness,
-        provenance: row.provenance,
+        provenance: {
+          ...row.provenance,
+          // importPath may differ across machines; not material evidence content.
+          importPath: undefined
+        },
         approval: row.approval,
         audienceHint: row.audienceHint || "",
         situationHint: row.situationHint || "",

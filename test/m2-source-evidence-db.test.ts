@@ -19,7 +19,9 @@ import { buildExplicitlyApprovedFaqRecord } from "./helpers/approvedFaqFixture.j
 
 const databaseUrl = process.env.DATABASE_URL || "postgresql://legends:legends@localhost:5432/legends_blog";
 
-async function writeApprovedTempFile(records = [buildExplicitlyApprovedFaqRecord({ id: `faq:db-${Date.now()}` })]) {
+async function writeApprovedTempFile(
+  records = [buildExplicitlyApprovedFaqRecord({ id: `faq:db-${Math.random().toString(36).slice(2, 10)}` })]
+) {
   const dir = await mkdtemp(join(tmpdir(), "faq-db-"));
   const path = join(dir, "approved.json");
   await writeFile(path, JSON.stringify(records), "utf8");
@@ -51,7 +53,7 @@ test("M2 db: unique provider/source_reference and content-aware upsert accountin
   const db = createDb(databaseUrl);
   await migrate(db);
   const path = await writeApprovedTempFile([
-    buildExplicitlyApprovedFaqRecord({ id: `faq:db-idempotency-${Date.now()}` })
+    buildExplicitlyApprovedFaqRecord({ id: `faq:db-idempotency-${Math.random().toString(36).slice(2, 10)}` })
   ]);
   const collected = await approvedFaqImportProvider.collect({
     collectedAt: new Date("2026-02-10T12:00:00Z"),
@@ -134,7 +136,7 @@ test("M2 db: empty production approved path accepts zero tasks; pending template
   assert.ok(emptyResult.readerTasksRejected >= 1);
 
   const approvedPath = await writeApprovedTempFile([
-    buildExplicitlyApprovedFaqRecord({ id: `faq:live-path-${Date.now()}` })
+    buildExplicitlyApprovedFaqRecord({ id: `faq:live-path-${Math.random().toString(36).slice(2, 10)}` })
   ]);
   const approvedResult = await runSourceEvidenceIngestion(db, {
     approvedFaqPath: approvedPath,
