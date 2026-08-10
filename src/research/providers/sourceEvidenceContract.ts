@@ -10,6 +10,8 @@ export interface SourceEvidenceProviderContext {
   env: NodeJS.ProcessEnv;
   /** Absolute or workspace-relative paths already resolved by caller. */
   approvedFaqPath?: string;
+  /** Pending/template FAQ path for merchant review (never production-approved). */
+  pendingFaqPath?: string;
   seedKeywords?: string[];
 }
 

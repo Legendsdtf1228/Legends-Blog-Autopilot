@@ -1,8 +1,12 @@
 /**
- * SourceEvidence — approved first-party evidence records (M2).
- * Seeds are brainstorming-only and never validated demand.
+ * SourceEvidence — first-party evidence records (M2).
+ * Seeds are brainstorming-only. Only production-APPROVED evidence is observed demand.
  */
 import { createHash } from "node:crypto";
+import {
+  isProductionApproved,
+  type EvidenceApprovalRecord
+} from "./evidenceApproval.js";
 import {
   PIPELINE_VERSIONS,
   createPipelineVersionStamp,
@@ -17,6 +21,7 @@ export type SourceEvidenceType =
   | "approved_product_question"
   | "approved_merchant_knowledge"
   | "manually_approved_import"
+  | "pending_faq_template"
   | "seed_brainstorm";
 
 export type SourceEvidenceConfidence = "high" | "medium" | "low" | "unknown";
@@ -27,7 +32,12 @@ export interface SourceEvidenceProvenance {
   description: string;
   approvedBy?: string;
   approvedAt?: string;
+  approvalMethod?: string;
   importPath?: string;
+  contentHash?: string;
+  publicUsageAllowed?: boolean;
+  usageScope?: string;
+  templateExample?: boolean;
   /** Explicit marker for seed brainstorming provenance. */
   brainstormOnly?: boolean;
 }
@@ -57,6 +67,8 @@ export interface SourceEvidence {
   confidence: SourceEvidenceConfidence;
   freshness: SourceEvidenceFreshness;
   provenance: SourceEvidenceProvenance;
+  /** Authoritative structured approval — not free-form JSON alone. */
+  approval: EvidenceApprovalRecord | null;
   /** Optional structured fields that aid ReaderTask normalization. */
   audienceHint?: string;
   situationHint?: string;
@@ -81,10 +93,25 @@ export function isSeedBrainstormEvidence(evidence: Pick<SourceEvidence, "sourceT
   return evidence.sourceType === "seed_brainstorm" || evidence.provenance.brainstormOnly === true;
 }
 
+export function isPendingOrTemplateEvidence(
+  evidence: Pick<SourceEvidence, "sourceType" | "approval" | "provenance">
+): boolean {
+  if (evidence.sourceType === "pending_faq_template") return true;
+  if (evidence.provenance.templateExample === true) return true;
+  if (evidence.approval?.approvalState === "PENDING_APPROVAL") return true;
+  if (evidence.approval?.approvalState === "REJECTED") return true;
+  if (evidence.approval?.approvalState === "REVOKED") return true;
+  return false;
+}
+
 export function sourceEvidenceDemandStatus(
-  evidence: Pick<SourceEvidence, "sourceType" | "provenance" | "metrics">
+  evidence: Pick<SourceEvidence, "sourceType" | "provenance" | "metrics" | "approval">
 ): "verified" | "observed" | "inferred_seed" | "unavailable" {
   if (isSeedBrainstormEvidence(evidence)) return "inferred_seed";
+  if (isPendingOrTemplateEvidence(evidence)) return "unavailable";
+  if (!isProductionApproved(evidence.approval ?? undefined, evidence.approval?.contentHash)) {
+    return "unavailable";
+  }
   const hasMetric = Object.values(evidence.metrics || {}).some(v => typeof v === "number" && Number.isFinite(v));
   if (hasMetric) return "observed";
   if (
@@ -122,11 +149,6 @@ export function validateSourceEvidence(raw: Partial<SourceEvidence>): SourceEvid
     reasons.push("provenance or summary appears to contain PII (email/phone/name pattern)");
   }
 
-  if (raw.freshness === "stale" && raw.sourceType !== "seed_brainstorm") {
-    // Stale evidence is valid as a record but marked for callers to skip normalization into active tasks.
-    // Malformed is different from stale — stale passes structural validation.
-  }
-
   return { ok: reasons.length === 0, reasons };
 }
 
@@ -138,12 +160,16 @@ export function buildSourceEvidenceId(provider: string, sourceReference: string)
 }
 
 export function stampSourceEvidence(
-  partial: Omit<SourceEvidence, "id" | "schemaVersion" | "pipelineVersions"> & { id?: string }
+  partial: Omit<SourceEvidence, "id" | "schemaVersion" | "pipelineVersions"> & {
+    id?: string;
+    approval?: EvidenceApprovalRecord | null;
+  }
 ): SourceEvidence {
   const stamped: SourceEvidence = {
     ...partial,
     id: partial.id || buildSourceEvidenceId(partial.provider, partial.sourceReference),
     metrics: partial.metrics || {},
+    approval: partial.approval ?? null,
     schemaVersion: SOURCE_EVIDENCE_SCHEMA_VERSION,
     pipelineVersions: createPipelineVersionStamp("M2")
   };
@@ -158,6 +184,37 @@ export function computeFreshness(periodEnd: string | null, now = new Date()): So
   if (ageDays <= 120) return "fresh";
   if (ageDays <= 365) return "aging";
   return "stale";
+}
+
+/** Material content fingerprint for idempotent upsert accounting. */
+export function materialEvidenceFingerprint(row: SourceEvidence): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        providerVersion: row.providerVersion,
+        sourceType: row.sourceType,
+        collectedAt: row.collectedAt,
+        periodStart: row.periodStart,
+        periodEnd: row.periodEnd,
+        geographicRelevance: row.geographicRelevance,
+        normalizedProblem: row.normalizedProblem,
+        normalizedQuestion: row.normalizedQuestion,
+        evidenceSummary: row.evidenceSummary,
+        metrics: row.metrics || {},
+        confidence: row.confidence,
+        freshness: row.freshness,
+        provenance: row.provenance,
+        approval: row.approval,
+        audienceHint: row.audienceHint || "",
+        situationHint: row.situationHint || "",
+        decisionHint: row.decisionHint || "",
+        desiredOutcomeHint: row.desiredOutcomeHint || "",
+        stakesHint: row.stakesHint || "",
+        constraintsHint: row.constraintsHint || [],
+        legendsRelevanceHint: row.legendsRelevanceHint || ""
+      })
+    )
+    .digest("hex");
 }
 
 /** Re-export for providers that need current version pins. */

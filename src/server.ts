@@ -378,7 +378,7 @@ app.post("/research/ingest-sources", async (req: AuthedRequest, res) => {
     const notice =
       `Source ingestion complete: ${result.readerTasksAccepted} ReaderTask(s) accepted, ` +
       `${result.readerTasksRejected} rejected, ` +
-      `${result.persisted.inserted} evidence inserted / ${result.persisted.updated} updated. ` +
+      `${result.persisted.inserted} evidence inserted / ${result.persisted.updated} updated / ${result.persisted.unchanged} unchanged. ` +
       `Generation pipeline unchanged.`;
     res.redirect("/research?notice=" + encodeURIComponent(notice));
   } catch (error) {

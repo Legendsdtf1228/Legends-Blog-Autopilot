@@ -528,6 +528,9 @@ export function researchPage(args: {
       lastCollectedAt: string | null;
     }>;
     sourceCountByType: Array<{ sourceType: string; count: number }>;
+    approvedEvidenceCount: number;
+    pendingApprovalCount: number;
+    revokedEvidenceCount: number;
     readerTaskCount: number;
     acceptedReaderTaskCount: number;
     rejectedNormalizationCount: number;
@@ -542,8 +545,10 @@ export function researchPage(args: {
   const sourceHealthCard = sourceHealth
     ? `<section class="card">
         <h3>Source evidence health (M2)</h3>
-        <p class="muted">First-party ingestion status. Seed brainstorming is never validated demand. Generation pipeline unchanged.</p>
+        <p class="muted">Operational importer only. Production-approved evidence requires explicit merchant approval. Templates/pending are review-only and are never observed demand. Generation pipeline unchanged.</p>
         <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(sourceHealth.approvedEvidenceCount))}</strong> production-approved evidence</div>
+          <div><strong>${esc(String(sourceHealth.pendingApprovalCount))}</strong> pending approval</div>
           <div><strong>${esc(String(sourceHealth.acceptedReaderTaskCount))}</strong> accepted ReaderTasks · ${esc(String(sourceHealth.readerTaskCount))} total</div>
           <div><strong>${esc(String(sourceHealth.rejectedNormalizationCount))}</strong> normalization rejections</div>
         </div>

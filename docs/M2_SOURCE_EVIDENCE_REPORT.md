@@ -1,24 +1,33 @@
-# M2 Report — Source-backed ReaderTask ingestion
+# M2 Report — Source-backed ReaderTask ingestion (provenance-corrected)
 
-**Commit basis:** lands on `cursor/topic-research-engine-338a` after M1 `97f65b7`  
+**Commit basis:** M2 correction on `cursor/topic-research-engine-338a` after M1 `97f65b7`  
 **PR #7:** remain Draft  
 **Production behavior:** unchanged (paused `draft_only`; scheduler AUTO-only; no threshold dilution)
 
 ---
 
+## Status of “first-party” evidence
+
+| Dataset | Path | Role | Count (repo default) |
+|---|---|---|---|
+| Production-approved FAQ | `data/approved/customer-faq.v1.json` | Only records with explicit merchant approval may live here | **0** (empty by design) |
+| Pending / template FAQ | `data/fixtures/customer-faq.templates.json` | Merchant-review fixtures only | **2** pending templates |
+| Seed brainstorm | in-code optional provider | Brainstorming only | N/A |
+
+**Do not call the path “live first-party” until `approvedEvidenceCount > 0` with trustworthy audit rows.**
+
+Current proof of the live path: **empty production-approved dataset + merchant approval workflow** (`approvePendingSourceEvidence` / `revokeSourceEvidenceApproval` / `invalidateApprovalIfContentChanged`).
+
+---
+
 ## Schema and migrations
 
-Migration id: `008_source_evidence_reader_tasks` (idempotent `CREATE TABLE IF NOT EXISTS` in `src/db.ts`).
-
-| Table | Purpose |
+| Migration | Purpose |
 |---|---|
-| `source_evidence` | First-party evidence records; `UNIQUE (provider, source_reference)` |
-| `reader_tasks` | Normalized tasks; accepted fingerprint unique partial index |
-| `source_evidence_reader_tasks` | Many-to-many support links |
-| `reader_task_rejections` | Normalization rejection telemetry |
-| `source_ingestion_runs` | Provider availability / last collection |
+| `008_source_evidence_reader_tasks` | Evidence / ReaderTask / ingestion run tables |
+| `009_evidence_approval_authority` | Structured approval columns, `material_hash`, `evidence_approval_audits`, `unchanged_count` |
 
-Artifacts stamp `schemaVersion` + `pipelineVersions` (M2).
+Approval is stored as authoritative columns (`approval_state`, `approved_by`, `approved_at`, `approval_method`, `content_hash`, `public_usage_allowed`, `usage_scope`, revoke fields) plus audit events — not free-form JSON alone.
 
 ---
 
@@ -26,15 +35,19 @@ Artifacts stamp `schemaVersion` + `pipelineVersions` (M2).
 
 | Provider | Status | Notes |
 |---|---|---|
-| `approved_customer_faq_import` | **Operational** | Reads `data/approved/customer-faq.v1.json` (or `APPROVED_FAQ_IMPORT_PATH`) |
-| `seed_brainstorm` | Optional brainstorm | Explicit `inferred_seed` / `brainstormOnly`; never validated demand |
-| GSC / Shopify Q&A / site search / approved web | **Not claimed** | Still stubs; not used in M2 ingestion |
+| `approved_customer_faq_import` | **Operational importer** | Rejects missing `approvedBy` / `approvedAt` / method / hash / scope. **Never defaults `approvedBy` to `"merchant"`.** |
+| `pending_faq_template_import` | Review-only | Loads fixtures as `PENDING_APPROVAL`; confidence `unknown`; demand `unavailable` |
+| `seed_brainstorm` | Optional brainstorm | Explicit `inferred_seed`; never validated demand |
+| GSC / Shopify Q&A / site search / approved web | **Not claimed** | Still stubs |
 
-### Proof first-party ≠ seeds
+### Trust boundary
 
-- FAQ file contains merchant-approved customer questions with `approvedBy` / `approvedAt`.
-- Provider sets `sourceType: "approved_customer_faq"` and demand status `observed`.
-- Seeds use `sourceType: "seed_brainstorm"` and cannot pass `isValidatedDemandReaderTask` / `readerTaskMayBecomeAutoEligible`.
+- Missing approval fields → reject  
+- `approvedBy: "merchant"` → reject  
+- Pending/template → no observed/verified demand, no high confidence, no accepted production ReaderTasks, not AUTO-eligible  
+- Content hash mismatch → approval invalid until re-approved  
+- Revoked → cannot create active ReaderTasks  
+- Content-aware upsert: identical retry → `unchanged` (no `updated_at` rewrite)
 
 ---
 
@@ -42,9 +55,8 @@ Artifacts stamp `schemaVersion` + `pipelineVersions` (M2).
 
 `normalizeSourceEvidenceToReaderTask`:
 
-- Infers audience/situation/question/decision from evidence hints  
-- Stable `semanticFingerprint`  
-- Rejects generic “buyers should know”, taxonomy leakage, missing decision, stale evidence  
+- Requires production `APPROVED` authority for acceptance  
+- Pending/template/seed paths retained for review/brainstorm but **not accepted**  
 - Groups only identical normalized questions (not M3 semantic clustering)  
 - **Does not generate titles**
 
@@ -55,35 +67,37 @@ Artifacts stamp `schemaVersion` + `pipelineVersions` (M2).
 - `test/m2-source-evidence-contract.test.ts`  
 - `test/m2-reader-task-normalization.test.ts`  
 - `test/m2-source-evidence-db.test.ts`  
+- `test/m2-trust-boundary.test.ts`  
 
-Plus existing suite (scheduler/rollout unchanged).
+Plus existing suite (scheduler/rollout/generation unchanged).
 
 ---
 
 ## Production behavior comparison
 
-| Area | Before M2 | After M2 |
+| Area | Before M2 | After M2 correction |
 |---|---|---|
 | Generation / titles / briefs / clustering | Unchanged | Unchanged |
 | AUTO thresholds / articleQuality starvation | Unchanged | Unchanged |
 | Scheduler AUTO-only | Unchanged | Unchanged |
-| Legacy opportunities / reservations | Unchanged | Unchanged (asserted in DB tests) |
-| New capability | — | Approved FAQ → SourceEvidence → ReaderTask + admin health card |
+| Legacy opportunities / reservations | Unchanged | Unchanged |
+| Approved production evidence count | (fabricated samples removed) | **0** until merchant approves |
+| New capability | — | Importer + pending review + approval audit workflow |
 
 ---
 
 ## Rollback plan
 
 1. Stop using `/research/ingest-sources`.  
-2. Optionally `DROP TABLE` M2 tables (payload-only; no opportunity FKs).  
-3. Revert M2 code; migration id remains harmlessly recorded.  
+2. Optionally drop M2 tables (payload-only; no opportunity FKs).  
+3. Revert M2 code; migration ids remain harmlessly recorded.  
 4. Defaults still paused.
 
 ---
 
 ## Unresolved M3 risks
 
-1. Identical-question grouping is not semantic clustering — near-duplicate FAQs stay separate until M3.  
-2. ReaderTasks are not yet linked into opportunity decisioning — AUTO starvation remains until later milestones wire tasks into research.  
-3. FAQ file is file-based; live CMS/admin editing of approved evidence is still future work.  
-4. Accepted fingerprint uniqueness may collide if two distinct decisions normalize too aggressively — M3 must preserve decision/audience distinctions.
+1. Identical-question grouping is not semantic clustering.  
+2. ReaderTasks are not yet linked into opportunity decisioning.  
+3. Merchant approval UI is workflow-backed in code; richer admin UX can follow without changing M2 boundaries.  
+4. Accepted fingerprint uniqueness may collide if two distinct decisions normalize too aggressively.

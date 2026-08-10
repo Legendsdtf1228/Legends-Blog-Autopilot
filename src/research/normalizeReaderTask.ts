@@ -1,8 +1,10 @@
 /**
  * Normalize SourceEvidence → ReaderTask (M2).
  * No title generation. No M3 semantic clustering.
+ * Pending/template/revoked/seed evidence cannot become accepted production ReaderTasks.
  */
 import { createHash } from "node:crypto";
+import { isProductionApproved } from "./evidenceApproval.js";
 import {
   buildReaderTaskStatement,
   emptyReaderTask,
@@ -11,6 +13,7 @@ import {
   type ReaderTaskConfidence
 } from "./readerTask.js";
 import {
+  isPendingOrTemplateEvidence,
   isSeedBrainstormEvidence,
   sourceEvidenceDemandStatus,
   type SourceEvidence
@@ -39,7 +42,10 @@ function inferIntent(question: string, geographic: string | null): SearchIntent 
 
 function confidenceFromEvidence(evidence: SourceEvidence[]): ReaderTaskConfidence {
   if (evidence.some(e => isSeedBrainstormEvidence(e))) return "low";
-  if (evidence.every(e => e.confidence === "high")) return "high";
+  if (evidence.some(e => isPendingOrTemplateEvidence(e))) return "low";
+  if (evidence.every(e => e.confidence === "high" && isProductionApproved(e.approval ?? undefined))) {
+    return "high";
+  }
   if (evidence.some(e => e.confidence === "medium" || e.confidence === "high")) return "medium";
   return "low";
 }
@@ -81,6 +87,16 @@ export function normalizeSourceEvidenceToReaderTask(
     };
   }
 
+  if (evidenceList.some(e => e.approval?.approvalState === "REVOKED")) {
+    return {
+      accepted: false,
+      task: null,
+      statement: "",
+      reasons: ["Revoked evidence cannot create active ReaderTasks."],
+      supportingEvidenceIds: evidenceList.map(e => e.id)
+    };
+  }
+
   // Stale non-seed evidence is rejected from active ReaderTask creation in M2.
   if (evidenceList.some(e => e.freshness === "stale" && !isSeedBrainstormEvidence(e))) {
     return {
@@ -110,6 +126,7 @@ export function normalizeSourceEvidenceToReaderTask(
   });
 
   const seedOnly = evidenceList.every(e => isSeedBrainstormEvidence(e));
+  const pendingOnly = evidenceList.every(e => isPendingOrTemplateEvidence(e));
   const demandStatuses = evidenceList.map(sourceEvidenceDemandStatus);
   const demandStatus = seedOnly
     ? "inferred_seed"
@@ -169,6 +186,72 @@ export function normalizeSourceEvidenceToReaderTask(
     };
   }
 
+  // Pending/template evidence may be stored for merchant review but never accepted as production.
+  if (pendingOnly || evidenceList.some(e => isPendingOrTemplateEvidence(e))) {
+    const fingerprint = buildSemanticFingerprint({
+      audience: audience || "pending",
+      actualQuestion,
+      decisionOrAction: decisionOrAction || "pending review",
+      situation: situation || problem
+    });
+    const task = emptyReaderTask({
+      id: `rt:${fingerprint}`,
+      audience: audience || "unspecified audience",
+      situation: situation || problem,
+      problem,
+      actualQuestion,
+      decisionOrAction: decisionOrAction || "pending merchant approval",
+      searchIntent: inferIntent(actualQuestion, primary.geographicRelevance),
+      desiredOutcome: desiredOutcome || "pending approval",
+      stakes: primary.stakesHint || "",
+      constraints: primary.constraintsHint || [],
+      evidenceRequired: ["Explicit merchant approval with content hash"],
+      evidenceAvailable: evidenceList.map(e => e.sourceReference),
+      demandEvidence: {
+        status: "unavailable",
+        summary: "Pending or template evidence — not observed demand.",
+        metrics: {},
+        sourceRefs: evidenceList.map(e => e.sourceReference),
+        lastUpdated: primary.collectedAt
+      },
+      legendsRelevance: primary.legendsRelevanceHint || "",
+      conversionPath: null,
+      sourceProvenance: evidenceList.map(
+        e => `${e.provider}:${e.sourceReference} (PENDING_APPROVAL)`
+      ),
+      confidence: "low",
+      freshness: freshnessFromEvidence(evidenceList),
+      semanticFingerprint: fingerprint,
+      pipelineVersions: createPipelineVersionStamp("M2")
+    });
+    return {
+      accepted: false,
+      task,
+      statement: buildReaderTaskStatement(task),
+      reasons: [
+        "Pending/template evidence cannot create accepted production ReaderTasks or observed demand.",
+        ...coherence.reasons
+      ],
+      supportingEvidenceIds: evidenceList.map(e => e.id)
+    };
+  }
+
+  // Production acceptance requires explicit APPROVED authority on every supporting record.
+  const unapproved = evidenceList.filter(
+    e => !isProductionApproved(e.approval ?? undefined, e.approval?.contentHash)
+  );
+  if (unapproved.length) {
+    return {
+      accepted: false,
+      task: null,
+      statement: coherence.statement,
+      reasons: [
+        "Supporting evidence lacks valid production approval (approvalState/approvedBy/approvedAt/method/hash/scope)."
+      ],
+      supportingEvidenceIds: evidenceList.map(e => e.id)
+    };
+  }
+
   if (!coherence.ok) {
     return {
       accepted: false,
@@ -211,9 +294,7 @@ export function normalizeSourceEvidenceToReaderTask(
     evidenceAvailable: evidenceList.map(e => `${e.sourceType}:${e.sourceReference}`),
     demandEvidence: {
       status: demandStatus,
-      summary: seedOnly
-        ? "Seed brainstorming only."
-        : `Observed from ${evidenceList.length} approved first-party evidence record(s).`,
+      summary: `Observed from ${evidenceList.length} merchant-approved first-party evidence record(s).`,
       metrics: Object.assign({}, ...evidenceList.map(e => e.metrics || {})),
       sourceRefs: evidenceList.map(e => e.sourceReference),
       lastUpdated: primary.collectedAt
@@ -224,8 +305,9 @@ export function normalizeSourceEvidenceToReaderTask(
       const bits = [
         e.provider,
         e.sourceReference,
-        e.provenance.approvedBy ? `approvedBy=${e.provenance.approvedBy}` : null,
-        e.provenance.approvedAt ? `approvedAt=${e.provenance.approvedAt}` : null
+        e.approval?.approvedBy ? `approvedBy=${e.approval.approvedBy}` : null,
+        e.approval?.approvedAt ? `approvedAt=${e.approval.approvedAt}` : null,
+        e.approval?.contentHash ? `contentHash=${e.approval.contentHash.slice(0, 12)}` : null
       ].filter(Boolean);
       return bits.join(":");
     }),
@@ -244,16 +326,18 @@ export function normalizeSourceEvidenceToReaderTask(
   };
 }
 
-/** Validated-demand gate for M2 — seed-only never qualifies. */
+/** Validated-demand gate for M2 — seed/pending never qualify. */
 export function isValidatedDemandReaderTask(task: ReaderTask): boolean {
   if (task.demandEvidence.status === "inferred_seed") return false;
-  if (task.sourceProvenance.some(p => /brainstormOnly|seed_brainstorm/i.test(p))) return false;
+  if (task.sourceProvenance.some(p => /brainstormOnly|seed_brainstorm|PENDING_APPROVAL/i.test(p))) {
+    return false;
+  }
   if (task.demandEvidence.status === "unavailable") return false;
   const coherence = validateReaderTaskCoherence(task);
   return coherence.ok && (task.demandEvidence.status === "observed" || task.demandEvidence.status === "verified");
 }
 
-/** Seed-only tasks must never be treated as AUTO_ELIGIBLE inputs. */
+/** Seed/pending tasks must never be treated as AUTO_ELIGIBLE inputs. */
 export function readerTaskMayBecomeAutoEligible(task: ReaderTask): boolean {
   return isValidatedDemandReaderTask(task);
 }

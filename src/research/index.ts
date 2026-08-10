@@ -20,6 +20,8 @@ export * from "./merchantKnowledge.js";
 export * from "./versioning.js";
 export * from "./readerTask.js";
 export * from "./sourceEvidence.js";
+export * from "./evidenceApproval.js";
+export * from "./merchantEvidenceApproval.js";
 export * from "./normalizeReaderTask.js";
 export * from "./sourceEvidenceStore.js";
 export * from "./ingestion.js";

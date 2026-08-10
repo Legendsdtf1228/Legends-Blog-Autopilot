@@ -4,7 +4,10 @@
  */
 import type { Db } from "../db.js";
 import { normalizeSourceEvidenceToReaderTask } from "./normalizeReaderTask.js";
-import { approvedFaqImportProvider } from "./providers/approvedFaqImport.js";
+import {
+  approvedFaqImportProvider,
+  pendingFaqTemplateProvider
+} from "./providers/approvedFaqImport.js";
 import { seedBrainstormEvidenceProvider } from "./providers/seedBrainstormEvidence.js";
 import type { SourceEvidenceProvider } from "./providers/sourceEvidenceContract.js";
 import type { SourceEvidence } from "./sourceEvidence.js";
@@ -16,8 +19,11 @@ import {
 
 export interface SourceIngestionOptions {
   includeSeedBrainstorm?: boolean;
+  /** Load fixture templates as PENDING_APPROVAL for merchant review (not production). */
+  includePendingTemplates?: boolean;
   seedKeywords?: string[];
   approvedFaqPath?: string;
+  pendingFaqPath?: string;
   region?: string;
   env?: NodeJS.ProcessEnv;
   now?: Date;
@@ -33,7 +39,7 @@ export interface SourceIngestionResult {
     evidenceCount: number;
     rejectedCount: number;
   }>;
-  persisted: { inserted: number; updated: number };
+  persisted: { inserted: number; updated: number; unchanged: number };
   readerTasksAccepted: number;
   readerTasksRejected: number;
   /** Evidence IDs that supported an accepted ReaderTask. */
@@ -60,6 +66,7 @@ export async function runSourceEvidenceIngestion(
   const env = options.env ?? process.env;
   const providers: SourceEvidenceProvider[] = options.providers || [
     approvedFaqImportProvider,
+    ...(options.includePendingTemplates ? [pendingFaqTemplateProvider] : []),
     ...(options.includeSeedBrainstorm ? [seedBrainstormEvidenceProvider] : [])
   ];
 
@@ -67,6 +74,7 @@ export async function runSourceEvidenceIngestion(
   const providerResults: SourceIngestionResult["providerResults"] = [];
   let inserted = 0;
   let updated = 0;
+  let unchanged = 0;
 
   for (const provider of providers) {
     const result = await provider.collect({
@@ -74,6 +82,7 @@ export async function runSourceEvidenceIngestion(
       region: options.region || "Middle Georgia",
       env,
       approvedFaqPath: options.approvedFaqPath,
+      pendingFaqPath: options.pendingFaqPath,
       seedKeywords: options.seedKeywords
     });
     providerResults.push({
@@ -88,6 +97,7 @@ export async function runSourceEvidenceIngestion(
     const persisted = await persistSourceEvidenceBatch(db, result.evidence);
     inserted += persisted.inserted;
     updated += persisted.updated;
+    unchanged += persisted.unchanged;
     await recordSourceIngestionRun(db, {
       provider: result.provider,
       available: result.available,
@@ -95,6 +105,7 @@ export async function runSourceEvidenceIngestion(
       collectedAt: now.toISOString(),
       insertedCount: persisted.inserted,
       updatedCount: persisted.updated,
+      unchangedCount: persisted.unchanged,
       rejectedCount: result.rejected.length,
       detail: {
         rejected: result.rejected,
@@ -126,7 +137,7 @@ export async function runSourceEvidenceIngestion(
   return {
     collectedAt: now.toISOString(),
     providerResults,
-    persisted: { inserted, updated },
+    persisted: { inserted, updated, unchanged },
     readerTasksAccepted,
     readerTasksRejected,
     acceptedEvidenceIds

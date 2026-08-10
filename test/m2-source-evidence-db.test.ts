@@ -1,8 +1,10 @@
 /**
- * M2 database tests: migrations, uniqueness, transactions, reservation isolation.
+ * M2 database tests: migrations, uniqueness, content-aware upserts, reservation isolation.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb, migrate } from "../src/db.js";
 import {
@@ -11,10 +13,18 @@ import {
   getSourceIngestionHealth,
   persistSourceEvidenceBatch,
   runSourceEvidenceIngestion,
-  stampSourceEvidence
+  approvedFaqImportProvider
 } from "../src/research/index.js";
+import { buildExplicitlyApprovedFaqRecord } from "./helpers/approvedFaqFixture.js";
 
 const databaseUrl = process.env.DATABASE_URL || "postgresql://legends:legends@localhost:5432/legends_blog";
+
+async function writeApprovedTempFile(records = [buildExplicitlyApprovedFaqRecord({ id: `faq:db-${Date.now()}` })]) {
+  const dir = await mkdtemp(join(tmpdir(), "faq-db-"));
+  const path = join(dir, "approved.json");
+  await writeFile(path, JSON.stringify(records), "utf8");
+  return path;
+}
 
 test("M2 db: idempotent migrations create source_evidence and reader_tasks", async () => {
   const db = createDb(databaseUrl);
@@ -23,46 +33,73 @@ test("M2 db: idempotent migrations create source_evidence and reader_tasks", asy
   const { rows } = await db.query<{ table_name: string }>(
     `SELECT table_name FROM information_schema.tables
      WHERE table_schema='public'
-       AND table_name IN ('source_evidence','reader_tasks','source_evidence_reader_tasks','source_ingestion_runs','reader_task_rejections')
+       AND table_name IN (
+         'source_evidence','reader_tasks','source_evidence_reader_tasks',
+         'source_ingestion_runs','reader_task_rejections','evidence_approval_audits'
+       )
      ORDER BY table_name`
   );
-  assert.equal(rows.length, 5);
+  assert.equal(rows.length, 6);
   const { rows: mig } = await db.query<{ id: string }>(
-    `SELECT id FROM schema_migrations WHERE id='008_source_evidence_reader_tasks'`
+    `SELECT id FROM schema_migrations WHERE id IN ('008_source_evidence_reader_tasks','009_evidence_approval_authority')`
   );
-  assert.equal(mig.length, 1);
+  assert.equal(mig.length, 2);
   await db.end();
 });
 
-test("M2 db: unique provider/source_reference and retry idempotency", async () => {
+test("M2 db: unique provider/source_reference and content-aware upsert accounting", async () => {
   const db = createDb(databaseUrl);
   await migrate(db);
-  const evidence = stampSourceEvidence({
-    provider: "approved_customer_faq_import",
-    providerVersion: "approved_faq.v1",
-    sourceType: "approved_customer_faq",
-    sourceReference: `faq:db-idempotency-${Date.now()}`,
-    collectedAt: new Date().toISOString(),
-    periodStart: null,
-    periodEnd: new Date().toISOString(),
-    geographicRelevance: "Middle Georgia",
-    normalizedProblem: "Unsure which decoration method fits a school deadline",
-    normalizedQuestion: "Which decoration method should we use for 40 spirit shirts before Friday?",
-    evidenceSummary: "approved FAQ",
-    metrics: {},
-    confidence: "high",
-    freshness: "fresh",
-    provenance: { description: "approved FAQ; no PII" },
-    audienceHint: "Middle Georgia school spirit coordinators",
-    situationHint: "Ordering about 40 spirit shirts before Friday kickoff",
-    decisionHint: "choose a decoration method and place the order",
-    desiredOutcomeHint: "shirts arrive on time"
+  const path = await writeApprovedTempFile([
+    buildExplicitlyApprovedFaqRecord({ id: `faq:db-idempotency-${Date.now()}` })
+  ]);
+  const collected = await approvedFaqImportProvider.collect({
+    collectedAt: new Date("2026-02-10T12:00:00Z"),
+    region: "Middle Georgia",
+    env: {},
+    approvedFaqPath: path
   });
+  const evidence = collected.evidence[0]!;
   const first = await persistSourceEvidenceBatch(db, [evidence]);
   assert.equal(first.inserted, 1);
-  const second = await persistSourceEvidenceBatch(db, [{ ...evidence, evidenceSummary: "approved FAQ updated summary" }]);
-  assert.equal(second.inserted, 0);
-  assert.equal(second.updated, 1);
+  assert.equal(first.updated, 0);
+  assert.equal(first.unchanged, 0);
+
+  const { rows: before } = await db.query<{ updated_at: Date }>(
+    `SELECT updated_at FROM source_evidence WHERE provider=$1 AND source_reference=$2`,
+    [evidence.provider, evidence.sourceReference]
+  );
+  const updatedAtBefore = before[0]!.updated_at;
+
+  const identical = await persistSourceEvidenceBatch(db, [evidence]);
+  assert.equal(identical.inserted, 0);
+  assert.equal(identical.updated, 0);
+  assert.equal(identical.unchanged, 1);
+
+  const { rows: afterIdentical } = await db.query<{ updated_at: Date }>(
+    `SELECT updated_at FROM source_evidence WHERE provider=$1 AND source_reference=$2`,
+    [evidence.provider, evidence.sourceReference]
+  );
+  assert.equal(
+    new Date(afterIdentical[0]!.updated_at).getTime(),
+    new Date(updatedAtBefore).getTime(),
+    "identical retry must not rewrite updated_at"
+  );
+
+  const changed = await persistSourceEvidenceBatch(db, [
+    {
+      ...evidence,
+      evidenceSummary: "approved FAQ updated summary for material change",
+      approval: {
+        ...evidence.approval!,
+        contentHash: evidence.approval!.contentHash
+      }
+    }
+  ]);
+  assert.equal(changed.inserted, 0);
+  assert.equal(changed.updated, 1);
+  assert.equal(changed.unchanged, 0);
+
   const { rows } = await db.query<{ n: string }>(
     `SELECT count(*)::text AS n FROM source_evidence WHERE provider=$1 AND source_reference=$2`,
     [evidence.provider, evidence.sourceReference]
@@ -71,7 +108,7 @@ test("M2 db: unique provider/source_reference and retry idempotency", async () =
   await db.end();
 });
 
-test("M2 db: full ingestion persists tasks and does not alter opportunity reservations", async () => {
+test("M2 db: empty production approved path accepts zero tasks; pending templates do not create accepted tasks", async () => {
   const db = createDb(databaseUrl);
   await migrate(db);
 
@@ -86,22 +123,35 @@ test("M2 db: full ingestion persists tasks and does not alter opportunity reserv
   const reservedMid = await countOpportunityReservations(db);
   assert.ok(reservedMid >= reservedBefore + 1);
 
-  const result = await runSourceEvidenceIngestion(db, {
+  const emptyResult = await runSourceEvidenceIngestion(db, {
     approvedFaqPath: join(process.cwd(), DEFAULT_APPROVED_FAQ_PATH),
     includeSeedBrainstorm: true,
+    includePendingTemplates: true,
     seedKeywords: ["embroidery vs DTF for work shirts"],
     region: "Middle Georgia"
   });
-  assert.ok(result.readerTasksAccepted >= 1, JSON.stringify(result));
-  assert.ok(result.persisted.inserted + result.persisted.updated >= 1);
+  assert.equal(emptyResult.readerTasksAccepted, 0, JSON.stringify(emptyResult));
+  assert.ok(emptyResult.readerTasksRejected >= 1);
 
-  // Retry ingestion — idempotent
+  const approvedPath = await writeApprovedTempFile([
+    buildExplicitlyApprovedFaqRecord({ id: `faq:live-path-${Date.now()}` })
+  ]);
+  const approvedResult = await runSourceEvidenceIngestion(db, {
+    approvedFaqPath: approvedPath,
+    includeSeedBrainstorm: false,
+    includePendingTemplates: false,
+    region: "Middle Georgia"
+  });
+  assert.equal(approvedResult.readerTasksAccepted, 1, JSON.stringify(approvedResult));
+
   const retry = await runSourceEvidenceIngestion(db, {
-    approvedFaqPath: join(process.cwd(), DEFAULT_APPROVED_FAQ_PATH),
+    approvedFaqPath: approvedPath,
     includeSeedBrainstorm: false,
     region: "Middle Georgia"
   });
   assert.equal(retry.persisted.inserted, 0);
+  assert.equal(retry.persisted.unchanged, 1);
+  assert.equal(retry.persisted.updated, 0);
 
   const reservedAfter = await countOpportunityReservations(db);
   assert.equal(reservedAfter, reservedMid, "M2 ingestion must not clear or change existing reservations");
@@ -115,7 +165,8 @@ test("M2 db: full ingestion persists tasks and does not alter opportunity reserv
 
   const health = await getSourceIngestionHealth(db);
   assert.ok(health.providers.some(p => p.provider === "approved_customer_faq_import"));
-  assert.ok(health.sourceCountByType.some(s => s.sourceType === "approved_customer_faq" && s.count >= 1));
+  assert.ok(typeof health.approvedEvidenceCount === "number");
+  assert.ok(typeof health.pendingApprovalCount === "number");
   assert.ok(health.acceptedReaderTaskCount >= 1);
 
   await db.query(`DELETE FROM research_opportunities WHERE id=$1`, [marker]);

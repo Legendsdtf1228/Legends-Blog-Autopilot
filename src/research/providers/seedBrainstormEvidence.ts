@@ -53,6 +53,7 @@ export const seedBrainstormEvidenceProvider: SourceEvidenceProvider = {
           description: "Seed catalog brainstorming input; explicit non-demand provenance.",
           brainstormOnly: true
         },
+        approval: null,
         audienceHint: "buyers",
         situationHint: "unspecified",
         decisionHint: "explore",

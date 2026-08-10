@@ -405,11 +405,45 @@ export async function migrate(db: Db): Promise<void> {
       collected_at timestamptz NOT NULL,
       inserted_count integer NOT NULL DEFAULT 0,
       updated_count integer NOT NULL DEFAULT 0,
+      unchanged_count integer NOT NULL DEFAULT 0,
       rejected_count integer NOT NULL DEFAULT 0,
       detail jsonb NOT NULL DEFAULT '{}'::jsonb,
       created_at timestamptz NOT NULL DEFAULT now()
     )`);
     await client.query("CREATE INDEX IF NOT EXISTS source_ingestion_runs_provider_idx ON source_ingestion_runs(provider, collected_at DESC)");
+
+    // M2 correction: authoritative approval columns + audit (009)
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approval_state text NOT NULL DEFAULT 'PENDING_APPROVAL'`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approved_by text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approved_at timestamptz`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approval_method text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS content_hash text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS public_usage_allowed boolean NOT NULL DEFAULT false`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS usage_scope text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS revoked_at timestamptz`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS revoked_by text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS revoke_reason text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS material_hash text`);
+    await client.query("CREATE INDEX IF NOT EXISTS source_evidence_approval_state_idx ON source_evidence(approval_state)");
+    await client.query(`ALTER TABLE source_ingestion_runs ADD COLUMN IF NOT EXISTS unchanged_count integer NOT NULL DEFAULT 0`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS evidence_approval_audits (
+      id bigserial PRIMARY KEY,
+      source_evidence_id text NOT NULL REFERENCES source_evidence(id) ON DELETE CASCADE,
+      action text NOT NULL,
+      actor text NOT NULL,
+      approved_by text,
+      approved_at timestamptz,
+      approval_method text,
+      content_hash text,
+      usage_scope text,
+      public_usage_allowed boolean,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS evidence_approval_audits_evidence_idx ON evidence_approval_audits(source_evidence_id, created_at DESC)"
+    );
 
     await client.query(`CREATE TABLE IF NOT EXISTS pillar_usage (
       id bigserial PRIMARY KEY,
@@ -474,7 +508,8 @@ export async function migrate(db: Db): Promise<void> {
       `INSERT INTO schema_migrations(id) VALUES
         ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research'),
         ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim'),
-        ('007_rollout_draft_counted_unique'), ('008_source_evidence_reader_tasks')
+        ('007_rollout_draft_counted_unique'), ('008_source_evidence_reader_tasks'),
+        ('009_evidence_approval_authority')
        ON CONFLICT DO NOTHING`
     );
 
