@@ -179,6 +179,19 @@ export type TopicDecision =
 
 export type DemandEvidenceClass = "verified_demand" | "inferred_opportunity" | "editorial_business_opportunity";
 
+export interface EditorialDecisionSummary {
+  originalKeyword?: string;
+  originalTitle?: string;
+  refinedKeyword?: string | null;
+  refinedTitle?: string | null;
+  contentPromiseClass?: string;
+  missingEvidence?: string[];
+  decision?: TopicDecision;
+  reasons?: string[];
+  merchantInputWouldUnlock?: boolean;
+  replacedByOtherTopic?: boolean;
+}
+
 export interface ResearchOpportunity {
   id: string;
   cluster: KeywordCluster;
@@ -207,6 +220,10 @@ export interface ResearchOpportunity {
   status: "suggested" | "reserved" | "approved" | "rejected" | "used";
   reservedBy?: string | null;
   reservedUntil?: string | null;
+  /** Admin-visible editorial decision telemetry */
+  editorialDecision?: EditorialDecisionSummary;
+  contentPromiseClass?: string;
+  evidenceConfidence?: number;
 }
 
 export interface ExternalFactRecord {
@@ -278,6 +295,11 @@ export interface ArticleBrief {
   topicSpecificity: number;
   uniqueness: number;
   seoDeliverables?: import("./seo.js").SeoDeliverables;
+  /** Admin-visible editorial decision telemetry */
+  editorialDecision?: EditorialDecisionSummary;
+  contentPromiseClass?: string;
+  evidenceConfidence?: number;
+  interviewQuestions?: string[];
   createdAt?: string;
   updatedAt?: string;
 }

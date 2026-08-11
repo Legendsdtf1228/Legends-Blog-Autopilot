@@ -63,8 +63,8 @@ function qualifiedMeta(keyword: string): string {
 function makeGenerated(title: string, keyword: string): GeneratedArticle {
   const meta = qualifiedMeta(keyword);
   const paragraph =
-    "Small-business owners choosing employee uniforms need a clear commercial comparison of embroidery and DTF for work shirts, covering durability, detail, cost-per-piece, and turnaround without invented guarantees. ";
-  const body = `<h2>What embroidery vs DTF means for work shirts</h2><p>${paragraph.repeat(25)}</p><h2>How to decide for your team</h2><p>${paragraph.repeat(15)}</p><p>Legends DTF Prints is located in Warner Robins, Georgia and serves Middle Georgia.</p>`;
+    "Small-business owners choosing employee uniforms should compare embroidery and DTF using durability, detail, wash performance, and cost-per-piece criteria. Ask which method fits daily wear, verify artwork constraints, and choose the option that matches the job without invented guarantees. ";
+  const body = `<h2>Decision criteria for work-shirt decoration</h2><p>${paragraph.repeat(20)}</p><h2>Trade-offs and when to switch methods</h2><p>${paragraph.repeat(15)}</p><p>When you are ready, review current product options on the storefront.</p>`;
   const safeTitle = title.length >= 25 ? title.slice(0, 70) : "Embroidery vs. DTF Printing: Which Is Better for Work Shirts?";
   return {
     title: safeTitle,
@@ -131,8 +131,8 @@ function autoEligibleOpportunity(): ResearchOpportunity {
     topicSpecificity: 0.92,
     uniqueness: 0.95,
     demandClass: "editorial_business_opportunity",
-    decision: "DRAFT_ONLY",
-    decisionReasons: ["Pre-generation fixture"],
+    decision: "AUTO_ELIGIBLE",
+    decisionReasons: ["Pre-generation AUTO_ELIGIBLE fixture"],
     failedGates: [],
     internalLinks: ["https://legendsdtf.com/pages/contact"],
     externalSources: [],

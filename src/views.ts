@@ -520,22 +520,286 @@ export function researchPage(args: {
   cycle: { collectedAt: string; missingProviders: Array<{ provider: string; reason: string }>; signalCount: number } | null;
   opportunities: ResearchOpportunity[];
   pillars: typeof CONTENT_PILLARS;
+  sourceHealth?: {
+    providers: Array<{
+      provider: string;
+      available: boolean;
+      reason: string | null;
+      lastCollectedAt: string | null;
+    }>;
+    sourceCountByType: Array<{ sourceType: string; count: number }>;
+    approvedEvidenceCount: number;
+    pendingApprovalCount: number;
+    revokedEvidenceCount: number;
+    readerTaskCount: number;
+    acceptedReaderTaskCount: number;
+    rejectedNormalizationCount: number;
+    recentRejectionReasons: Array<{ reason: string; count: number }>;
+  } | null;
+  clusterHealth?: {
+    clusteringVersion: string;
+    activeClusterCount: number;
+    singletonClusterCount: number;
+    multiTaskClusterCount: number;
+    needsReviewClusterCount: number;
+    reviewCandidateCount: number;
+    conflictPairCount: number;
+    unassignedTaskCount: number;
+    lastClusteringRunAt: string | null;
+    lastClusteringRun: {
+      inserted: number;
+      updated: number;
+      unchanged: number;
+      superseded: number;
+    } | null;
+    sampleClusters: Array<{
+      id: string;
+      status: string;
+      memberCount: number;
+      canonicalReaderTaskId: string;
+      mergeConfidence: number;
+      requiresManualReview: boolean;
+      similarityExplanation: string;
+    }>;
+  } | null;
+  knowledgeHealth?: {
+    evaluationVersion: string;
+    approvedKnowledgeCount: number;
+    pendingApprovalCount: number;
+    rejectedRevokedInvalidatedStaleCount: number;
+    knowledgeByClass: Array<{ knowledgeClass: string; count: number }>;
+    knowledgeBySourceType: Array<{ sourceType: string; count: number }>;
+    clustersWithBudgets: number;
+    clustersMissingMerchantKnowledge: number;
+    clustersMissingTechnicalEvidence: number;
+    contradictionClaimCount: number;
+    staleClaimCount: number;
+    interviewPacketCount: number;
+    openInterviewPacketCount: number;
+    sampleClaimTraces: Array<{
+      clusterId: string;
+      claimId: string;
+      claimClass: string;
+      supportStatus: string;
+      trace: string;
+    }>;
+    lastEvaluationRunAt: string | null;
+  } | null;
+  titleHealth?: {
+    titleVersion: string;
+    briefVersion: string;
+    titleProposalCount: number;
+    intentNativeBriefCount: number;
+    bannedTemplateCount: number;
+    diversityMaxShare: number;
+    diversityViolationCount: number;
+    decisionHintCounts: Array<{ hint: string; count: number }>;
+    patternFamilyCounts: Array<{ family: string; count: number }>;
+    sampleTitles: Array<{ title: string; patternFamily: string; diversityOk: boolean }>;
+    lastRunAt: string | null;
+  } | null;
 }) {
   const missing = args.cycle?.missingProviders?.length
     ? `<div class="notice">${args.cycle.missingProviders.map(m => `<div><strong>${esc(m.provider)}</strong>: ${esc(m.reason)}</div>`).join("")}</div>`
     : `<p class="muted">No missing providers recorded yet.</p>`;
 
+  const sourceHealth = args.sourceHealth;
+  const sourceHealthCard = sourceHealth
+    ? `<section class="card">
+        <h3>Source evidence health (M2)</h3>
+        <p class="muted">Operational importer only. Production-approved evidence requires explicit merchant approval. Templates/pending are review-only and are never observed demand. Generation pipeline unchanged.</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(sourceHealth.approvedEvidenceCount))}</strong> production-approved evidence</div>
+          <div><strong>${esc(String(sourceHealth.pendingApprovalCount))}</strong> pending approval</div>
+          <div><strong>${esc(String(sourceHealth.acceptedReaderTaskCount))}</strong> accepted ReaderTasks · ${esc(String(sourceHealth.readerTaskCount))} total</div>
+          <div><strong>${esc(String(sourceHealth.rejectedNormalizationCount))}</strong> normalization rejections</div>
+        </div>
+        <h4>Providers</h4>
+        <ul>${sourceHealth.providers.length
+          ? sourceHealth.providers.map(p =>
+              `<li><strong>${esc(p.provider)}</strong>: ${p.available ? "available" : "unavailable"}
+                ${p.lastCollectedAt ? ` · last ${esc(new Date(p.lastCollectedAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}` : ""}
+                ${p.reason ? `<div class="muted">${esc(p.reason)}</div>` : ""}</li>`
+            ).join("")
+          : "<li class=\"muted\">No ingestion runs yet. Use “Ingest approved sources”.</li>"}</ul>
+        <h4>Sources by type</h4>
+        <ul>${sourceHealth.sourceCountByType.length
+          ? sourceHealth.sourceCountByType.map(s => `<li>${esc(s.sourceType)}: ${esc(String(s.count))}</li>`).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        ${sourceHealth.recentRejectionReasons.length
+          ? `<h4>Recent rejection reasons</h4><ul>${sourceHealth.recentRejectionReasons.map(r =>
+              `<li>${esc(r.reason)}: ${esc(String(r.count))}</li>`
+            ).join("")}</ul>`
+          : ""}
+        <form method="post" action="/research/ingest-sources" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Ingest approved sources</button>
+        </form>
+      </section>`
+    : "";
+
+  const clusterHealth = args.clusterHealth;
+  const clusterHealthCard = clusterHealth
+    ? `<section class="card">
+        <h3>ReaderTask clusters (M3)</h3>
+        <p class="muted">Semantic clustering by shared reader decision. Does not create opportunities or change generation. Version: ${esc(clusterHealth.clusteringVersion)}</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(clusterHealth.activeClusterCount))}</strong> active clusters</div>
+          <div><strong>${esc(String(clusterHealth.singletonClusterCount))}</strong> singletons</div>
+          <div><strong>${esc(String(clusterHealth.multiTaskClusterCount))}</strong> multi-task</div>
+          <div><strong>${esc(String(clusterHealth.reviewCandidateCount))}</strong> possible duplicates for review</div>
+          <div><strong>${esc(String(clusterHealth.conflictPairCount))}</strong> conflict pairs</div>
+          <div><strong>${esc(String(clusterHealth.unassignedTaskCount))}</strong> unassigned tasks</div>
+        </div>
+        ${clusterHealth.lastClusteringRunAt
+          ? `<p class="muted">Last run ${esc(new Date(clusterHealth.lastClusteringRunAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}
+              · inserted ${esc(String(clusterHealth.lastClusteringRun?.inserted ?? 0))}
+              / updated ${esc(String(clusterHealth.lastClusteringRun?.updated ?? 0))}
+              / unchanged ${esc(String(clusterHealth.lastClusteringRun?.unchanged ?? 0))}
+              / superseded ${esc(String(clusterHealth.lastClusteringRun?.superseded ?? 0))}</p>`
+          : `<p class="muted">No clustering runs yet.</p>`}
+        <h4>Cluster traces (sample)</h4>
+        <ul>${clusterHealth.sampleClusters.length
+          ? clusterHealth.sampleClusters.map(c =>
+              `<li><strong>${esc(c.id)}</strong> · ${esc(String(c.memberCount))} member(s) · canonical ${esc(c.canonicalReaderTaskId)}
+                · confidence ${esc(String(c.mergeConfidence))}
+                ${c.requiresManualReview ? " · <em>needs review</em>" : ""}
+                <div class="muted">${esc(c.similarityExplanation.slice(0, 240))}${c.similarityExplanation.length > 240 ? "…" : ""}</div></li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <form method="post" action="/research/cluster-reader-tasks" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Run semantic clustering</button>
+        </form>
+      </section>`
+    : "";
+
+  const knowledgeHealth = args.knowledgeHealth;
+  const knowledgeHealthCard = knowledgeHealth
+    ? `<section class="card">
+        <h3>Knowledge registry (M4)</h3>
+        <p class="muted">Approved knowledge and claim-level evidence budgets for ReaderTask clusters. Does not generate titles, briefs, or articles. Does not assign AUTO_ELIGIBLE. Version: ${esc(knowledgeHealth.evaluationVersion)}</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(knowledgeHealth.approvedKnowledgeCount))}</strong> approved knowledge</div>
+          <div><strong>${esc(String(knowledgeHealth.pendingApprovalCount))}</strong> pending approval</div>
+          <div><strong>${esc(String(knowledgeHealth.rejectedRevokedInvalidatedStaleCount))}</strong> rejected/revoked/invalidated/stale</div>
+          <div><strong>${esc(String(knowledgeHealth.clustersWithBudgets))}</strong> clusters with evidence budgets</div>
+          <div><strong>${esc(String(knowledgeHealth.clustersMissingMerchantKnowledge))}</strong> missing merchant knowledge</div>
+          <div><strong>${esc(String(knowledgeHealth.clustersMissingTechnicalEvidence))}</strong> missing technical evidence</div>
+          <div><strong>${esc(String(knowledgeHealth.contradictionClaimCount))}</strong> conflicting claims</div>
+          <div><strong>${esc(String(knowledgeHealth.staleClaimCount))}</strong> stale claims</div>
+          <div><strong>${esc(String(knowledgeHealth.openInterviewPacketCount))}</strong> open interview packets · ${esc(String(knowledgeHealth.interviewPacketCount))} total</div>
+        </div>
+        ${knowledgeHealth.lastEvaluationRunAt
+          ? `<p class="muted">Last evaluation ${esc(new Date(knowledgeHealth.lastEvaluationRunAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>`
+          : `<p class="muted">No knowledge evaluations yet.</p>`}
+        <h4>Knowledge by class</h4>
+        <ul>${knowledgeHealth.knowledgeByClass.length
+          ? knowledgeHealth.knowledgeByClass.map(k =>
+              `<li>${esc(k.knowledgeClass)}: ${esc(String(k.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Knowledge by source type</h4>
+        <ul>${knowledgeHealth.knowledgeBySourceType.length
+          ? knowledgeHealth.knowledgeBySourceType.map(k =>
+              `<li>${esc(k.sourceType)}: ${esc(String(k.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Claim-level traces (sample)</h4>
+        <ul>${knowledgeHealth.sampleClaimTraces.length
+          ? knowledgeHealth.sampleClaimTraces.map(t =>
+              `<li><strong>${esc(t.claimClass)}</strong> · ${esc(t.supportStatus)}
+                <div class="muted">${esc(t.trace.slice(0, 320))}${t.trace.length > 320 ? "…" : ""}</div></li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <form method="post" action="/research/evaluate-knowledge" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Evaluate cluster evidence budgets</button>
+        </form>
+      </section>`
+    : "";
+
+  const titleHealth = args.titleHealth;
+  const titleHealthCard = titleHealth
+    ? `<section class="card">
+        <h3>Natural titles &amp; intent-native briefs (M5)</h3>
+        <p class="muted">Titles and briefs from canonical ReaderTasks. Banned template suffixes removed from production paths. Diversity cap ${esc(String(Math.round(titleHealth.diversityMaxShare * 100)))}%. Does not assign AUTO_ELIGIBLE. Versions: ${esc(titleHealth.titleVersion)} · ${esc(titleHealth.briefVersion)}</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(titleHealth.titleProposalCount))}</strong> title proposals</div>
+          <div><strong>${esc(String(titleHealth.intentNativeBriefCount))}</strong> intent-native briefs</div>
+          <div><strong>${esc(String(titleHealth.bannedTemplateCount))}</strong> banned-template flags</div>
+          <div><strong>${esc(String(titleHealth.diversityViolationCount))}</strong> diversity flags</div>
+        </div>
+        ${titleHealth.lastRunAt
+          ? `<p class="muted">Last run ${esc(new Date(titleHealth.lastRunAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>`
+          : `<p class="muted">No title generation runs yet.</p>`}
+        <h4>Decision hints (not AUTO)</h4>
+        <ul>${titleHealth.decisionHintCounts.length
+          ? titleHealth.decisionHintCounts.map(h =>
+              `<li>${esc(h.hint)}: ${esc(String(h.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Pattern families</h4>
+        <ul>${titleHealth.patternFamilyCounts.length
+          ? titleHealth.patternFamilyCounts.map(f =>
+              `<li>${esc(f.family)}: ${esc(String(f.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Sample titles</h4>
+        <ul>${titleHealth.sampleTitles.length
+          ? titleHealth.sampleTitles.map(t =>
+              `<li><strong>${esc(t.title)}</strong>
+                <div class="muted">${esc(t.patternFamily)}${t.diversityOk ? "" : " · diversity flag"}</div></li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <form method="post" action="/research/generate-natural-titles" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Generate natural titles &amp; briefs</button>
+        </form>
+      </section>`
+    : "";
+
+  const failureSummary = (() => {
+    const counts = new Map<string, number>();
+    for (const o of args.opportunities) {
+      if (o.decision !== "REJECTED" && o.decision !== "NEEDS_MERCHANT_INPUT" && o.decision !== "DRAFT_ONLY") {
+        continue;
+      }
+      const missing = o.editorialDecision?.missingEvidence || [];
+      if (missing.length) {
+        for (const m of missing) {
+          counts.set(m, (counts.get(m) || 0) + 1);
+        }
+      } else {
+        const key = `${o.decision}:${o.contentPromiseClass || "unclassified"}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    if (!counts.size) return "";
+    const items = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([k, n]) => `<li>${esc(k)}: ${n}</li>`)
+      .join("");
+    return `<section class="card"><h3>Common editorial failure classes</h3><ul>${items}</ul></section>`;
+  })();
+
   const rows = args.opportunities.slice(0, 25).map(o => `
     <tr>
-      <td><a href="/research/opportunities/${esc(o.id)}">${esc(o.proposedTitle)}</a></td>
+      <td><a href="/research/opportunities/${esc(o.id)}">${esc(o.proposedTitle)}</a>
+        <div class="muted">${esc(o.editorialDecision?.originalKeyword && o.editorialDecision.originalKeyword !== o.cluster.primaryKeyword
+          ? `Refined from: ${o.editorialDecision.originalKeyword}`
+          : "")}</div>
+        <div class="muted">${esc((o.decisionReasons || []).slice(0, 2).join(" · "))}</div>
+      </td>
       <td>${esc(o.cluster.pillar)}</td>
       <td>${esc(o.cluster.primaryKeyword)}</td>
-      <td>${esc(AUDIENCE_LABELS[o.cluster.audience])}</td>
-      <td>${esc(FORMAT_LABELS[o.cluster.format])}</td>
+      <td>${esc(o.contentPromiseClass || "—")}</td>
+      <td>${esc((o.editorialDecision?.missingEvidence || []).join("; ") || "—")}</td>
       <td>${esc(o.scores.opportunityScore.toFixed(3))}</td>
-      <td>${esc(o.decision || "—")}</td>
+      <td>${esc(o.decision || "—")}${o.editorialDecision?.replacedByOtherTopic ? " (replaced)" : ""}</td>
       <td>${esc(o.status)}</td>
-      <td>${esc(o.dataCollectedLabel)}</td>
+      <td>${o.editorialDecision?.merchantInputWouldUnlock ? "Yes" : "No"}</td>
     </tr>`).join("") || `<tr><td colspan="9" class="muted">No opportunities yet. Run a research cycle.</td></tr>`;
 
   return `
@@ -553,6 +817,11 @@ export function researchPage(args: {
     ${args.cycle ? `<p><strong>${esc(args.cycle.signalCount)}</strong> signals · collected ${esc(new Date(args.cycle.collectedAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>` : ""}
     ${missing}
   </section>
+  ${sourceHealthCard}
+  ${clusterHealthCard}
+  ${knowledgeHealthCard}
+  ${titleHealthCard}
+  ${failureSummary}
   <section class="card">
     <h3>Approved content pillars</h3>
     <ul>${args.pillars.map(p => `<li><strong>${esc(p.label)}</strong> — ${esc(p.subcategories.slice(0, 3).join(", "))}</li>`).join("")}</ul>
@@ -562,7 +831,7 @@ export function researchPage(args: {
     <h3>Ranked opportunities</h3>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Topic</th><th>Pillar</th><th>Keyword</th><th>Audience</th><th>Format</th><th>Score</th><th>Decision</th><th>Status</th><th>Data freshness</th></tr></thead>
+        <thead><tr><th>Topic</th><th>Pillar</th><th>Keyword</th><th>Promise</th><th>Missing evidence</th><th>Score</th><th>Decision</th><th>Status</th><th>Merchant input?</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -639,6 +908,12 @@ export function briefReviewPage(args: {
       <dt>Search intent</dt><dd>${esc(b.searchIntent)}</dd>
       <dt>Decision</dt><dd>${esc(b.decision || "DRAFT_ONLY")} ${b.automaticPublishingEligible ? "(auto-eligible)" : "(not auto-eligible)"}</dd>
       <dt>Decision reasons</dt><dd>${esc((b.decisionReasons || []).join(" · ") || "—")}</dd>
+      <dt>Original topic</dt><dd>${esc(b.editorialDecision?.originalKeyword || b.primaryKeyword)}</dd>
+      <dt>Refined topic</dt><dd>${esc(b.editorialDecision?.refinedKeyword || "—")}</dd>
+      <dt>Content promise class</dt><dd>${esc(b.contentPromiseClass || b.editorialDecision?.contentPromiseClass || "—")}</dd>
+      <dt>Missing evidence</dt><dd>${esc((b.editorialDecision?.missingEvidence || []).join("; ") || "—")}</dd>
+      <dt>Merchant input would unlock</dt><dd>${b.editorialDecision?.merchantInputWouldUnlock ? "Yes" : "No"}</dd>
+      <dt>Evidence confidence</dt><dd>${esc(String(b.evidenceConfidence ?? "—"))}</dd>
       <dt>Topic specificity / uniqueness</dt><dd>${esc(String(b.topicSpecificity ?? "—"))} / ${esc(String(b.uniqueness ?? "—"))}</dd>
       <dt>Demand class</dt><dd>${esc(b.demandClass || "editorial_business_opportunity")}</dd>
       <dt>Geographic target</dt><dd>${esc(b.geographicTarget)}</dd>

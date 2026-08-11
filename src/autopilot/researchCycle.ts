@@ -37,6 +37,11 @@ import {
   type ResearchCycleResult,
   type ResearchOpportunity
 } from "../research/index.js";
+import {
+  countsTowardRolloutDraft,
+  quarantineFailedRolloutArticles,
+  quarantineFailedRolloutOpportunities
+} from "../research/quarantine.js";
 import { getProductLinks, publishArticle } from "../shopify.js";
 import type { GeneratedArticle, ProductLink, Settings } from "../types.js";
 import { generateArticle as defaultGenerateArticle } from "../writer.js";
@@ -184,6 +189,15 @@ function postGenerationDecision(args: {
     + (args.evidence.editorialFindings || []).filter(f => f.severity === "major").length;
   const gatesOk = qualityGatesPassed(args.evidence);
   const linkGate = args.evidence.qualityGateResults.find(g => g.gate === "internal_links");
+  const semanticFail = (args.evidence.qualityGateResults || []).some(g =>
+    !g.ok &&
+    g.severity === "critical" &&
+    /semantic|quarantined|uv_dtf|incoherent|audience_purpose|forced_internal|template/i.test(g.gate)
+  ) || (args.evidence.editorialFindings || []).some(f =>
+    f.severity === "critical" &&
+    /quarantined|uv_dtf|incoherent|audience_purpose|forced_internal|title_specificity|template/i.test(f.gate)
+  );
+
   const scorecard = scorecardFromOpportunity({
     scores: args.brief.scores,
     topicSpecificity: args.brief.topicSpecificity,
@@ -204,7 +218,14 @@ function postGenerationDecision(args: {
     requiresInterview: args.brief.requiresInterview,
     interviewComplete: args.interviewComplete,
     specificityOk: args.brief.topicSpecificity >= args.settings.research.minTopicSpecificity,
-    overlapRejected: args.brief.overlapScore >= args.settings.research.overlapRejectThreshold
+    overlapRejected: args.brief.overlapScore >= args.settings.research.overlapRejectThreshold,
+    semanticRejected: semanticFail,
+    semanticReasons: [
+      ...(args.evidence.qualityGateResults || []).filter(g => !g.ok).map(g => `${g.gate}: ${g.detail}`),
+      ...(args.evidence.editorialFindings || [])
+        .filter(f => f.severity === "critical" || f.severity === "major")
+        .map(f => `${f.gate}: ${f.detail}`)
+    ].filter(r => /semantic|quarantined|uv_dtf|incoherent|audience|forced_internal|insufficient|template|turnaround|pressing/i.test(r))
   });
 
   const brief: ArticleBrief = {
@@ -217,7 +238,8 @@ function postGenerationDecision(args: {
         .filter(f => f.severity === "critical" || f.severity === "major")
         .map(f => f.gate)
     ],
-    automaticPublishingEligible: outcome.decision === "AUTO_ELIGIBLE" && gatesOk
+    automaticPublishingEligible: outcome.decision === "AUTO_ELIGIBLE" && gatesOk,
+    status: outcome.decision === "REJECTED" ? "rejected" : args.brief.status
   };
   const evidence: EvidenceReport = {
     ...args.evidence,
@@ -347,37 +369,58 @@ async function generateArticleFromBrief(args: {
     settings: args.settings,
     interviewComplete: Boolean(!brief.requiresInterview || interview?.completed)
   });
-  brief = { ...decided.brief, status: "approved" as ArticleBrief["status"] };
+  brief = {
+    ...decided.brief,
+    status: decided.brief.decision === "REJECTED" ? "rejected" : "approved"
+  };
   evidence = decided.evidence;
 
   const gatesOk = qualityGatesPassed(evidence);
+  const rejected = brief.decision === "REJECTED";
   await updateArticle(args.db, placeholder.id, {
     ...normalizeArticle(fromGenerated(generated, args.settings.authorName), { author: args.settings.authorName }).content,
-    status: "draft",
-    generationError: gatesOk ? null : "Quality gates flagged issues — review evidence report before publishing.",
-    lastError: gatesOk ? null : evidence.reviewFlags.join("; ").slice(0, 500),
+    // REJECTED articles are archived so they never count toward the 30-draft rollout.
+    status: rejected ? "archived" : "draft",
+    generationError: rejected
+      ? `REJECTED: ${(brief.decisionReasons || []).join("; ").slice(0, 400)}`
+      : gatesOk
+        ? null
+        : "Quality gates flagged issues — review evidence report before publishing.",
+    lastError: rejected || !gatesOk
+      ? evidence.reviewFlags.join("; ").slice(0, 500)
+      : null,
     generationSettings: {
       briefId: brief.id,
       opportunityId: brief.opportunityId,
       researchPipeline: true,
       decision: brief.decision,
-      automaticPublishingEligible: brief.automaticPublishingEligible,
-      slotKey: args.slotKey
+      automaticPublishingEligible: !rejected && brief.automaticPublishingEligible,
+      countsTowardRollout: !rejected && countsTowardRolloutDraft({
+        title: generated.title,
+        primaryKeyword: generated.primaryKeyword,
+        decision: brief.decision,
+        status: rejected ? "archived" : "draft"
+      }),
+      slotKey: args.slotKey,
+      rejected: rejected || undefined,
+      rejectionReasons: rejected ? brief.decisionReasons : undefined
     }
   });
   await updateBrief(args.db, brief.id!, brief);
   await attachBriefArticle(args.db, brief.id!, placeholder.id);
   await saveEvidenceReport(args.db, placeholder.id, brief.id!, evidence);
-  await markOpportunityStatus(args.db, brief.opportunityId, "used");
-  await recordPillarUsage(args.db, {
-    pillar: brief.pillar,
-    subcategory: brief.subcategory,
-    audience: brief.audience,
-    format: brief.format,
-    primaryKeyword: brief.primaryKeyword,
-    articleId: placeholder.id,
-    usedAt: new Date().toISOString()
-  });
+  await markOpportunityStatus(args.db, brief.opportunityId, rejected ? "rejected" : "used");
+  if (!rejected) {
+    await recordPillarUsage(args.db, {
+      pillar: brief.pillar,
+      subcategory: brief.subcategory,
+      audience: brief.audience,
+      format: brief.format,
+      primaryKeyword: brief.primaryKeyword,
+      articleId: placeholder.id,
+      usedAt: new Date().toISOString()
+    });
+  }
 
   return { articleId: placeholder.id, generated, evidence, brief };
 }
@@ -417,6 +460,13 @@ export async function executeScheduledResearchCycle(args: {
       reasons: [`Rollout mode ${mode} does not run research.`],
       mode
     };
+  }
+
+  try {
+    await quarantineFailedRolloutArticles(args.db);
+    await quarantineFailedRolloutOpportunities(args.db);
+  } catch {
+    /* non-fatal — gates still reject at generation/quality time */
   }
 
   const claim = await claimResearchSlot(args.db, args.slotKey, mode, abandonedClaimMinutes);
@@ -470,8 +520,63 @@ export async function executeScheduledResearchCycle(args: {
       };
     }
 
-    opportunityId = result.selected.id;
-    const reserved = await reserveOpportunity(args.db, result.selected.id, `cycle:${args.slotKey}`);
+    // Autonomous schedule: generate only AUTO_ELIGIBLE. Never fall back to DRAFT_ONLY filler.
+    // Merchant-input may be reserved solely to create an interview packet (no generation).
+    const autoOpp = result.opportunities.find(o =>
+      o.decision === "AUTO_ELIGIBLE" && o.status !== "rejected"
+    ) || (result.selected?.decision === "AUTO_ELIGIBLE" ? result.selected : null);
+
+    let selectedOpp = autoOpp;
+    if (!selectedOpp && result.selected?.decision === "NEEDS_MERCHANT_INPUT") {
+      selectedOpp = result.selected;
+    } else if (!selectedOpp) {
+      const merchant = result.opportunities.find(o =>
+        o.decision === "NEEDS_MERCHANT_INPUT" && o.status !== "rejected"
+      );
+      selectedOpp = merchant || null;
+    }
+
+    if (result.selected && selectedOpp && result.selected.id !== selectedOpp.id) {
+      await recordAudit(args.db, {
+        actor: args.actor || "scheduler",
+        action: "research_cycle_skipped_non_auto_topic",
+        detail: {
+          slotKey: args.slotKey,
+          skippedOpportunityId: result.selected.id,
+          skippedTitle: result.selected.proposedTitle,
+          skippedDecision: result.selected.decision,
+          selectedOpportunityId: selectedOpp.id,
+          selectedTitle: selectedOpp.proposedTitle,
+          selectedDecision: selectedOpp.decision
+        }
+      });
+    }
+
+    if (!selectedOpp) {
+      const reasons = [
+        "No AUTO_ELIGIBLE topic available for autonomous generation.",
+        "DRAFT_ONLY topics are not auto-generated (refuse schedule filler)."
+      ];
+      await completeResearchSlot(args.db, runId, {
+        decision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
+        collectedAt: result.collectedAt
+      });
+      await recordAudit(args.db, {
+        actor: args.actor || "scheduler",
+        action: "research_cycle_skipped",
+        detail: { slotKey: args.slotKey, reasons, mode, runId, refusedDraftOnlyFiller: true }
+      });
+      return {
+        ok: true,
+        cycleDecision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
+        mode
+      };
+    }
+
+    opportunityId = selectedOpp.id;
+    const reserved = await reserveOpportunity(args.db, selectedOpp.id, `cycle:${args.slotKey}`);
     if (!reserved) {
       await completeResearchSlot(args.db, runId, {
         decision: "SKIPPED_NO_QUALIFIED_TOPIC",
@@ -499,7 +604,12 @@ export async function executeScheduledResearchCycle(args: {
 
     if (brief.requiresInterview || brief.decision === "NEEDS_MERCHANT_INPUT") {
       const interview = await getInterviewForBrief(args.db, brief.id!);
-      if (!interview) await saveInterview(args.db, createInterviewDraft(brief.id!));
+      if (!interview) {
+        await saveInterview(
+          args.db,
+          createInterviewDraft(brief.id!, brief.interviewQuestions)
+        );
+      }
       await completeResearchSlot(args.db, runId, {
         decision: "NEEDS_MERCHANT_INPUT",
         reasons: brief.decisionReasons.length
@@ -512,12 +622,47 @@ export async function executeScheduledResearchCycle(args: {
       await recordAudit(args.db, {
         actor: args.actor || "scheduler",
         action: "research_cycle_needs_merchant_input",
-        detail: { slotKey: args.slotKey, briefId, opportunityId, mode }
+        detail: {
+          slotKey: args.slotKey,
+          briefId,
+          opportunityId,
+          mode,
+          contentPromiseClass: brief.contentPromiseClass,
+          missingEvidence: brief.editorialDecision?.missingEvidence || []
+        }
       });
       return {
         ok: true,
         cycleDecision: "NEEDS_MERCHANT_INPUT",
         reasons: ["Merchant interview required; brief saved without generation."],
+        briefId,
+        opportunityId,
+        mode
+      };
+    }
+
+    // Hard gate: automatic generation requires AUTO_ELIGIBLE only.
+    if (brief.decision !== "AUTO_ELIGIBLE" || reserved.decision !== "AUTO_ELIGIBLE") {
+      const reasons = [
+        `Refusing automatic generation for decision ${brief.decision} (AUTO_ELIGIBLE required).`,
+        "DRAFT_ONLY and other non-auto decisions are not schedule filler."
+      ];
+      await completeResearchSlot(args.db, runId, {
+        decision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
+        opportunityId,
+        briefId,
+        collectedAt: result.collectedAt
+      });
+      await recordAudit(args.db, {
+        actor: args.actor || "scheduler",
+        action: "research_cycle_refused_non_auto_generation",
+        detail: { slotKey: args.slotKey, opportunityId, briefId, decision: brief.decision, mode }
+      });
+      return {
+        ok: true,
+        cycleDecision: "SKIPPED_NO_QUALIFIED_TOPIC",
+        reasons,
         briefId,
         opportunityId,
         mode

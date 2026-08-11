@@ -27,6 +27,7 @@ import {
 } from "./db.js";
 import { AutopilotWorker } from "./scheduler.js";
 import { promotionAllowsAutoPublish } from "./autopilot/rollout.js";
+import { recordReviewedDraftForRollout } from "./autopilot/rolloutProgress.js";
 import { getProductLinks, listBlogs, publishArticle, searchProducts, verifyShopify, safeShopifyErrorMessage } from "./shopify.js";
 import { diagnoseOpenAI, generateArticle } from "./writer.js";
 import { fromGenerated, normalizeArticle, toGenerated, validateArticle } from "./content.js";
@@ -88,6 +89,15 @@ import {
   saveEvidenceReport,
   saveInterview,
   saveResearchCycle,
+  storeApprovedInterviewKnowledge,
+  getSourceIngestionHealth,
+  getClusterHealth,
+  getKnowledgeRegistryHealth,
+  getNaturalTitleHealth,
+  evaluateAndPersistAllActiveClusters,
+  generateTitlesForActiveClusters,
+  runSourceEvidenceIngestion,
+  runSemanticReaderTaskClustering,
   updateBrief
 } from "./research/index.js";
 
@@ -336,7 +346,14 @@ app.get("/", async (req: AuthedRequest, res) => {
 // ---- Topic research ----
 app.get("/research", async (req: AuthedRequest, res) => {
   const settings = await getSettings(db);
-  const [cycle, opportunities] = await Promise.all([latestCycleMeta(db), listOpportunities(db, 40)]);
+  const [cycle, opportunities, sourceHealth, clusterHealth, knowledgeHealth, titleHealth] = await Promise.all([
+    latestCycleMeta(db),
+    listOpportunities(db, 40),
+    getSourceIngestionHealth(db).catch(() => null),
+    getClusterHealth(db).catch(() => null),
+    getKnowledgeRegistryHealth(db).catch(() => null),
+    getNaturalTitleHealth(db).catch(() => null)
+  ]);
   res.send(layout({
     active: "/research",
     config,
@@ -349,9 +366,99 @@ app.get("/research", async (req: AuthedRequest, res) => {
       csrf: getCsrf(req),
       cycle,
       opportunities,
-      pillars: CONTENT_PILLARS
+      pillars: CONTENT_PILLARS,
+      sourceHealth,
+      clusterHealth,
+      knowledgeHealth,
+      titleHealth
     })
   }));
+});
+
+app.post("/research/cluster-reader-tasks", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await runSemanticReaderTaskClustering(db, `admin:${req.auth?.user || "merchant"}`);
+    const notice =
+      `Semantic clustering complete: ${result.activeClusterCount} active cluster(s), ` +
+      `${result.reviewCandidateCount} review candidate(s), ` +
+      `${result.inserted} inserted / ${result.updated} updated / ${result.unchanged} unchanged / ${result.superseded} superseded. ` +
+      `No opportunities created.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Clustering failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
+});
+
+app.post("/research/evaluate-knowledge", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await evaluateAndPersistAllActiveClusters(db, {
+      actor: `admin:${req.auth?.user || "ops"}`
+    });
+    const notice =
+      `Knowledge evaluation complete: ${result.budgets.length} cluster budget(s), ` +
+      `${result.packets.length} interview packet(s), ` +
+      `${result.persist.inserted} inserted / ${result.persist.updated} updated / ${result.persist.unchanged} unchanged. ` +
+      `No AUTO_ELIGIBLE decisions created.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Knowledge evaluation failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
+});
+
+app.post("/research/generate-natural-titles", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await generateTitlesForActiveClusters(db, {
+      actor: `admin:${req.auth?.user || "ops"}`
+    });
+    const notice =
+      `Natural title generation complete: ${result.generated} generated / ${result.unchanged} unchanged, ` +
+      `${result.diversityViolations} diversity flag(s). No AUTO_ELIGIBLE decisions created.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Natural title generation failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
+});
+
+app.post("/research/ingest-sources", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await runSourceEvidenceIngestion(db, {
+      region: settings.research.region || settings.timezone,
+      includeSeedBrainstorm: false,
+      env: process.env
+    });
+    const notice =
+      `Source ingestion complete: ${result.readerTasksAccepted} ReaderTask(s) accepted, ` +
+      `${result.readerTasksRejected} rejected, ` +
+      `${result.persisted.inserted} evidence inserted / ${result.persisted.updated} updated / ${result.persisted.unchanged} unchanged. ` +
+      `Generation pipeline unchanged.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Source ingestion failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
 });
 
 app.post("/research/run", async (req: AuthedRequest, res) => {
@@ -551,6 +658,12 @@ app.post("/research/briefs/:id/interview", async (req: AuthedRequest, res) => {
     brief.factSheet = { ...brief.factSheet, businessFacts: facts };
     brief.status = "approved";
     await updateBrief(db, id, brief);
+    await storeApprovedInterviewKnowledge(db, {
+      interview,
+      topicClass: brief.contentPromiseClass || brief.format || "firsthand_experience",
+      briefId: id,
+      approvedBy: actor(req)
+    });
   }
   res.redirect(`/research/briefs/${id}?notice=${encodeURIComponent(interview.completed ? "Interview saved. You can approve and generate." : "Interview saved. Complete every answer (8+ chars) to unlock generation.")}`);
 });
@@ -936,6 +1049,18 @@ app.post("/articles/:id", async (req: AuthedRequest, res) => {
     merchantEditedFields: [...new Set([...existing.merchantEditedFields, ...editedFields])]
   });
   await recordAudit(db, { actor: actor(req), action: "article_updated", articleId: id, detail: { editedFields } });
+
+  // Merchant marking a draft ready is the review-approval event for rollout progress.
+  if (requireReady && status === "ready") {
+    const rollout = await recordReviewedDraftForRollout(db, id, { actor: actor(req) });
+    const notice = rollout.counted
+      ? `Saved and counted toward rollout (${rollout.consecutiveReviewedDrafts} reviewed drafts).`
+      : rollout.alreadyCounted
+        ? "Saved. Rollout progress unchanged (already counted)."
+        : `Saved. Not counted toward rollout: ${rollout.reasons.join("; ") || "ineligible"}.`;
+    return res.redirect(`/articles/${id}?notice=${encodeURIComponent(notice)}`);
+  }
+
   res.redirect(`/articles/${id}?notice=${encodeURIComponent("Saved.")}`);
 });
 

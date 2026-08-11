@@ -1,4 +1,9 @@
 import type { KeywordCluster } from "./types.js";
+import {
+  assessSemanticAlignment,
+  isIncoherentSearchIntent,
+  suggestLocalPrinterRefinement
+} from "./semanticIntent.js";
 
 export interface SpecificityAssessment {
   score: number;
@@ -49,6 +54,13 @@ export function suggestRefinement(keyword: string): {
       intent: "commercial",
       readerQuestion: "Is DTF or vinyl the better decoration method for small apparel runs?"
     };
+  }
+  if (
+    isIncoherentSearchIntent(n) ||
+    /\blocal small-?business stories\b/i.test(n) ||
+    /\bhow to choose a local custom shirt printer\b/i.test(n)
+  ) {
+    return suggestLocalPrinterRefinement();
   }
   return null;
 }
@@ -110,9 +122,35 @@ export function assessTopicSpecificity(args: {
     reasons.push("No clear unique angle or distinct-question explanation.");
   }
 
+  const semantic = assessSemanticAlignment({
+    primaryKeyword: keyword,
+    proposedTitle: args.proposedTitle,
+    audienceLabel: args.audienceLabel,
+    outline: args.outline,
+    whyDistinct: args.whyDistinct
+    // readerQuestion intentionally omitted — specificity runs before the brief locks a question
+  });
+  if (!semantic.ok) {
+    score = Math.min(score, semantic.score);
+    reasons.push(...semantic.reasons);
+  }
+
   score = Math.max(0, Math.min(1, score));
-  const refinement = suggestRefinement(keyword);
-  const ok = score >= 0.85 && !BROAD_ONE_WORD.test(keyword) && !(args.proposedTitle && GENERIC_TITLE.test(args.proposedTitle));
+  const refinement = suggestRefinement(keyword) || (semantic.refinedKeyword
+    ? {
+        keyword: semantic.refinedKeyword,
+        title: semantic.refinedTitle || suggestLocalPrinterRefinement().title,
+        audience: semantic.audienceHint || suggestLocalPrinterRefinement().audience,
+        intent: semantic.intentHint || "local",
+        readerQuestion: semantic.readerQuestion || suggestLocalPrinterRefinement().readerQuestion
+      }
+    : null);
+  const ok =
+    score >= 0.85 &&
+    semantic.ok &&
+    !BROAD_ONE_WORD.test(keyword) &&
+    !(args.proposedTitle && GENERIC_TITLE.test(args.proposedTitle)) &&
+    !isIncoherentSearchIntent(keyword);
 
   return {
     score: Number(score.toFixed(4)),
@@ -133,11 +171,30 @@ export function isPlaceholderOutline(outline: string[]): boolean {
 
 export function buildTopicSpecificOutline(cluster: KeywordCluster, readerQuestion: string): string[] {
   const k = cluster.primaryKeyword;
+  // Intent-led structure — avoid the interchangeable “What X means / Common mistakes / How Legends can help” template.
+  if (cluster.format === "comparison" || /\bvs\.?\b|versus|compar/i.test(k)) {
+    return [
+      `Decision criteria for evaluating ${k}`,
+      `Side-by-side trade-offs that answer: ${readerQuestion}`,
+      `When each option is the better fit`,
+      `Exceptions and common selection mistakes`,
+      `A practical next step after you choose`
+    ];
+  }
+  if (cluster.format === "checklist" || cluster.format === "how_to" || cluster.intent === "local") {
+    return [
+      `Clarify the job-to-be-done behind “${k}”`,
+      `Questions to ask before you commit`,
+      `How to compare options against your constraints`,
+      `Red flags and conditions that change the answer`,
+      `Your next concrete step`
+    ];
+  }
   return [
-    `What “${k}” means for ${cluster.audience.replace(/_/g, " ")} facing this decision`,
-    `Answer the reader question: ${readerQuestion}`,
-    `Compare the practical trade-offs specific to ${cluster.subcategory}`,
-    `Common mistakes when choosing or applying ${k}`,
-    `How Legends DTF Prints in Warner Robins / Middle Georgia can help next`
+    `What ${cluster.audience.replace(/_/g, " ")} need to decide about ${k}`,
+    `Answer: ${readerQuestion}`,
+    `Trade-offs specific to ${cluster.subcategory}`,
+    `Conditions and exceptions that change the answer`,
+    `A useful next step without a hard sell`
   ];
 }

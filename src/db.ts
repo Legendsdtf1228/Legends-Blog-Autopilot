@@ -185,6 +185,21 @@ export async function migrate(db: Db): Promise<void> {
     )`);
     await client.query("CREATE INDEX IF NOT EXISTS audit_events_created_idx ON audit_events(created_at DESC)");
     await client.query("CREATE INDEX IF NOT EXISTS audit_events_article_idx ON audit_events(article_id, created_at DESC)");
+    // One rollout_draft_counted audit event per article (concurrency / idempotency)
+    await client.query(`
+      DELETE FROM audit_events a
+      USING audit_events b
+      WHERE a.action = 'rollout_draft_counted'
+        AND b.action = 'rollout_draft_counted'
+        AND a.article_id IS NOT NULL
+        AND a.article_id = b.article_id
+        AND a.id > b.id
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS audit_events_rollout_draft_counted_article_uidx
+      ON audit_events(article_id)
+      WHERE action = 'rollout_draft_counted' AND article_id IS NOT NULL
+    `);
 
     await client.query(`CREATE TABLE IF NOT EXISTS sessions (
       id text PRIMARY KEY,
@@ -306,6 +321,239 @@ export async function migrate(db: Db): Promise<void> {
     )`);
     await client.query("CREATE INDEX IF NOT EXISTS merchant_interviews_brief_idx ON merchant_interviews(brief_id)");
 
+    await client.query(`CREATE TABLE IF NOT EXISTS merchant_knowledge (
+      id bigserial PRIMARY KEY,
+      topic_class text NOT NULL,
+      question text NOT NULL,
+      answer text NOT NULL,
+      source_brief_id bigint,
+      approved_at timestamptz NOT NULL DEFAULT now(),
+      approved_by text NOT NULL DEFAULT 'merchant',
+      reusable boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS merchant_knowledge_class_idx ON merchant_knowledge(topic_class)");
+
+    // M2: source-backed ReaderTask ingestion (additive; does not alter opportunities)
+    await client.query(`CREATE TABLE IF NOT EXISTS source_evidence (
+      id text PRIMARY KEY,
+      provider text NOT NULL,
+      provider_version text NOT NULL,
+      source_type text NOT NULL,
+      source_reference text NOT NULL,
+      collected_at timestamptz NOT NULL,
+      period_start timestamptz,
+      period_end timestamptz,
+      geographic_relevance text,
+      normalized_problem text NOT NULL,
+      normalized_question text NOT NULL,
+      evidence_summary text NOT NULL,
+      metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
+      confidence text NOT NULL,
+      freshness text NOT NULL,
+      provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+      payload jsonb NOT NULL,
+      schema_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (provider, source_reference)
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS source_evidence_type_idx ON source_evidence(source_type)");
+    await client.query("CREATE INDEX IF NOT EXISTS source_evidence_collected_idx ON source_evidence(collected_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS reader_tasks (
+      id text PRIMARY KEY,
+      payload jsonb NOT NULL,
+      semantic_fingerprint text NOT NULL,
+      demand_status text NOT NULL,
+      normalization_status text NOT NULL
+        CHECK (normalization_status IN ('accepted','rejected')),
+      rejection_reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+      schema_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS reader_tasks_status_idx ON reader_tasks(normalization_status, updated_at DESC)");
+    await client.query("CREATE INDEX IF NOT EXISTS reader_tasks_fingerprint_idx ON reader_tasks(semantic_fingerprint)");
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS reader_tasks_fingerprint_accepted_uidx
+      ON reader_tasks(semantic_fingerprint)
+      WHERE normalization_status = 'accepted'
+    `);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS source_evidence_reader_tasks (
+      source_evidence_id text NOT NULL REFERENCES source_evidence(id) ON DELETE CASCADE,
+      reader_task_id text NOT NULL REFERENCES reader_tasks(id) ON DELETE CASCADE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (source_evidence_id, reader_task_id)
+    )`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS reader_task_rejections (
+      id bigserial PRIMARY KEY,
+      reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+      supporting_evidence_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS reader_task_rejections_created_idx ON reader_task_rejections(created_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS source_ingestion_runs (
+      id bigserial PRIMARY KEY,
+      provider text NOT NULL,
+      available boolean NOT NULL,
+      reason text,
+      collected_at timestamptz NOT NULL,
+      inserted_count integer NOT NULL DEFAULT 0,
+      updated_count integer NOT NULL DEFAULT 0,
+      unchanged_count integer NOT NULL DEFAULT 0,
+      rejected_count integer NOT NULL DEFAULT 0,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS source_ingestion_runs_provider_idx ON source_ingestion_runs(provider, collected_at DESC)");
+
+    // M2 correction: authoritative approval columns + audit (009)
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approval_state text NOT NULL DEFAULT 'PENDING_APPROVAL'`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approved_by text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approved_at timestamptz`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS approval_method text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS content_hash text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS public_usage_allowed boolean NOT NULL DEFAULT false`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS usage_scope text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS revoked_at timestamptz`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS revoked_by text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS revoke_reason text`);
+    await client.query(`ALTER TABLE source_evidence ADD COLUMN IF NOT EXISTS material_hash text`);
+    await client.query("CREATE INDEX IF NOT EXISTS source_evidence_approval_state_idx ON source_evidence(approval_state)");
+    await client.query(`ALTER TABLE source_ingestion_runs ADD COLUMN IF NOT EXISTS unchanged_count integer NOT NULL DEFAULT 0`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS evidence_approval_audits (
+      id bigserial PRIMARY KEY,
+      source_evidence_id text NOT NULL REFERENCES source_evidence(id) ON DELETE CASCADE,
+      action text NOT NULL,
+      actor text NOT NULL,
+      approved_by text,
+      approved_at timestamptz,
+      approval_method text,
+      content_hash text,
+      usage_scope text,
+      public_usage_allowed boolean,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS evidence_approval_audits_evidence_idx ON evidence_approval_audits(source_evidence_id, created_at DESC)"
+    );
+
+    // M3: semantic ReaderTask clustering (additive; does not create opportunities)
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_clusters (
+      id text PRIMARY KEY,
+      canonical_reader_task_id text NOT NULL,
+      semantic_fingerprint text NOT NULL,
+      clustering_version text NOT NULL,
+      status text NOT NULL
+        CHECK (status IN ('active','needs_review','superseded','split','merged_away')),
+      canonical_audience text NOT NULL,
+      canonical_situation text NOT NULL,
+      canonical_problem text NOT NULL,
+      canonical_question text NOT NULL,
+      canonical_decision text NOT NULL,
+      canonical_intent text NOT NULL,
+      canonical_desired_outcome text NOT NULL,
+      merged_evidence_summary text NOT NULL DEFAULT '',
+      similarity_explanation text NOT NULL DEFAULT '',
+      merge_confidence double precision NOT NULL DEFAULT 0,
+      requires_manual_review boolean NOT NULL DEFAULT false,
+      demand_status text NOT NULL DEFAULT 'unavailable',
+      confidence text NOT NULL DEFAULT 'unknown',
+      wording_variants jsonb NOT NULL DEFAULT '[]'::jsonb,
+      conflicts jsonb NOT NULL DEFAULT '[]'::jsonb,
+      supporting_evidence_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+      payload jsonb NOT NULL,
+      material_hash text NOT NULL,
+      schema_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_clusters_status_idx ON opportunity_clusters(status, updated_at DESC)");
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_clusters_canonical_idx ON opportunity_clusters(canonical_reader_task_id)");
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_clusters_version_idx ON opportunity_clusters(clustering_version)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_members (
+      cluster_id text NOT NULL REFERENCES opportunity_clusters(id) ON DELETE CASCADE,
+      reader_task_id text NOT NULL REFERENCES reader_tasks(id) ON DELETE CASCADE,
+      semantic_fingerprint text NOT NULL DEFAULT '',
+      join_reason text NOT NULL DEFAULT '',
+      is_canonical boolean NOT NULL DEFAULT false,
+      active boolean NOT NULL DEFAULT true,
+      clustering_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      left_at timestamptz,
+      PRIMARY KEY (cluster_id, reader_task_id)
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_cluster_members_task_idx ON opportunity_cluster_members(reader_task_id, active)");
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_cluster_members_active_idx ON opportunity_cluster_members(cluster_id, active)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_evidence (
+      cluster_id text NOT NULL REFERENCES opportunity_clusters(id) ON DELETE CASCADE,
+      source_evidence_id text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (cluster_id, source_evidence_id)
+    )`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_audits (
+      id bigserial PRIMARY KEY,
+      cluster_id text NOT NULL REFERENCES opportunity_clusters(id) ON DELETE CASCADE,
+      action text NOT NULL,
+      actor text NOT NULL,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS opportunity_cluster_audits_cluster_idx ON opportunity_cluster_audits(cluster_id, created_at ASC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS reader_task_cluster_history (
+      id bigserial PRIMARY KEY,
+      reader_task_id text NOT NULL REFERENCES reader_tasks(id) ON DELETE CASCADE,
+      cluster_id text NOT NULL,
+      action text NOT NULL,
+      is_canonical boolean NOT NULL DEFAULT false,
+      clustering_version text NOT NULL,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS reader_task_cluster_history_task_idx ON reader_task_cluster_history(reader_task_id, created_at DESC)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS opportunity_cluster_review_candidates (
+      id bigserial PRIMARY KEY,
+      left_reader_task_id text NOT NULL,
+      right_reader_task_id text NOT NULL,
+      similarity_score double precision NOT NULL,
+      explanation text NOT NULL,
+      reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+      clustering_version text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (left_reader_task_id, right_reader_task_id, clustering_version)
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS opportunity_cluster_review_version_idx ON opportunity_cluster_review_candidates(clustering_version)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS clustering_runs (
+      id bigserial PRIMARY KEY,
+      clustering_version text NOT NULL,
+      inserted_count integer NOT NULL DEFAULT 0,
+      updated_count integer NOT NULL DEFAULT 0,
+      unchanged_count integer NOT NULL DEFAULT 0,
+      superseded_count integer NOT NULL DEFAULT 0,
+      active_cluster_count integer NOT NULL DEFAULT 0,
+      review_candidate_count integer NOT NULL DEFAULT 0,
+      conflict_pair_count integer NOT NULL DEFAULT 0,
+      unassigned_task_count integer NOT NULL DEFAULT 0,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS clustering_runs_created_idx ON clustering_runs(created_at DESC)");
+
     await client.query(`CREATE TABLE IF NOT EXISTS pillar_usage (
       id bigserial PRIMARY KEY,
       pillar text NOT NULL,
@@ -365,10 +613,269 @@ export async function migrate(db: Db): Promise<void> {
       END $$;
     `);
 
+    // M4: evidence and approved-knowledge registry (additive; no legacy opportunity mutation)
+    await client.query(`CREATE TABLE IF NOT EXISTS knowledge_entries (
+      id text PRIMARY KEY,
+      knowledge_class text NOT NULL,
+      normalized_claim text NOT NULL,
+      exact_approved_fact text NOT NULL,
+      scope jsonb NOT NULL DEFAULT '{}'::jsonb,
+      source_type text NOT NULL,
+      source_reference text NOT NULL,
+      provenance text NOT NULL DEFAULT '',
+      approval_state text NOT NULL
+        CHECK (approval_state IN (
+          'PENDING_APPROVAL','APPROVED','REJECTED','REVOKED','INVALIDATED','STALE'
+        )),
+      approved_by text,
+      approved_at timestamptz,
+      approval_method text,
+      content_hash text NOT NULL,
+      revision_id text NOT NULL,
+      public_usage_allowed boolean NOT NULL DEFAULT false,
+      usage_scope text NOT NULL DEFAULT '',
+      firsthand boolean NOT NULL DEFAULT false,
+      confidence text NOT NULL DEFAULT 'unknown',
+      effective_from timestamptz,
+      effective_to timestamptz,
+      freshness_policy_days integer,
+      contradictions jsonb NOT NULL DEFAULT '[]'::jsonb,
+      revoked_at timestamptz,
+      revoked_by text,
+      revoke_reason text,
+      schema_version text NOT NULL,
+      pipeline_versions jsonb NOT NULL DEFAULT '{}'::jsonb,
+      material_hash text NOT NULL,
+      payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS knowledge_entries_class_idx ON knowledge_entries(knowledge_class)");
+    await client.query("CREATE INDEX IF NOT EXISTS knowledge_entries_approval_idx ON knowledge_entries(approval_state)");
+    await client.query("CREATE INDEX IF NOT EXISTS knowledge_entries_source_type_idx ON knowledge_entries(source_type)");
+    await client.query("CREATE UNIQUE INDEX IF NOT EXISTS knowledge_entries_content_hash_uidx ON knowledge_entries(id, content_hash)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS knowledge_entry_revisions (
+      revision_id text PRIMARY KEY,
+      entry_id text NOT NULL REFERENCES knowledge_entries(id) ON DELETE CASCADE,
+      content_hash text NOT NULL,
+      payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (entry_id, content_hash)
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS knowledge_entry_revisions_entry_idx ON knowledge_entry_revisions(entry_id, created_at DESC)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS knowledge_approvals (
+      id bigserial PRIMARY KEY,
+      entry_id text NOT NULL REFERENCES knowledge_entries(id) ON DELETE CASCADE,
+      revision_id text NOT NULL,
+      content_hash text NOT NULL,
+      approval_state text NOT NULL,
+      approved_by text NOT NULL,
+      approved_at timestamptz NOT NULL,
+      approval_method text NOT NULL,
+      public_usage_allowed boolean NOT NULL DEFAULT false,
+      usage_scope text NOT NULL DEFAULT '',
+      invalidated_at timestamptz,
+      invalidation_reason text,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      UNIQUE (entry_id, revision_id, content_hash, approval_state, approved_at)
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS knowledge_approvals_entry_idx ON knowledge_approvals(entry_id, created_at DESC)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS knowledge_source_links (
+      entry_id text NOT NULL REFERENCES knowledge_entries(id) ON DELETE CASCADE,
+      source_evidence_id text NOT NULL,
+      link_role text NOT NULL DEFAULT 'supports',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (entry_id, source_evidence_id)
+    )`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS knowledge_claims (
+      id text PRIMARY KEY,
+      cluster_id text NOT NULL,
+      claim_class text NOT NULL,
+      normalized_claim text NOT NULL,
+      payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query("CREATE INDEX IF NOT EXISTS knowledge_claims_cluster_idx ON knowledge_claims(cluster_id)");
+
+    await client.query(`CREATE TABLE IF NOT EXISTS cluster_evidence_budgets (
+      cluster_id text PRIMARY KEY,
+      canonical_reader_task_id text NOT NULL,
+      evaluation_version text NOT NULL,
+      payload jsonb NOT NULL,
+      material_hash text NOT NULL,
+      readiness_status text NOT NULL,
+      schema_version text NOT NULL,
+      pipeline_versions jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS cluster_evidence_budgets_readiness_idx ON cluster_evidence_budgets(readiness_status)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS cluster_claim_requirements (
+      id text PRIMARY KEY,
+      cluster_id text NOT NULL,
+      claim_class text NOT NULL,
+      normalized_claim text NOT NULL,
+      support_status text NOT NULL,
+      payload jsonb NOT NULL,
+      material_hash text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS cluster_claim_requirements_cluster_idx ON cluster_claim_requirements(cluster_id, support_status)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS merchant_interview_packets (
+      id text PRIMARY KEY,
+      knowledge_class text NOT NULL,
+      payload jsonb NOT NULL,
+      material_hash text NOT NULL,
+      completion_status text NOT NULL
+        CHECK (completion_status IN ('open','answered_pending_approval','approved','closed')),
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS merchant_interview_packets_class_idx ON merchant_interview_packets(knowledge_class, completion_status)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS merchant_interview_questions (
+      id text PRIMARY KEY,
+      packet_id text NOT NULL REFERENCES merchant_interview_packets(id) ON DELETE CASCADE,
+      prompt text NOT NULL,
+      payload jsonb NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS merchant_interview_questions_packet_idx ON merchant_interview_questions(packet_id)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS merchant_interview_answers (
+      packet_id text NOT NULL REFERENCES merchant_interview_packets(id) ON DELETE CASCADE,
+      question_id text NOT NULL REFERENCES merchant_interview_questions(id) ON DELETE CASCADE,
+      entry_id text REFERENCES knowledge_entries(id) ON DELETE SET NULL,
+      revision_id text,
+      answer_text text NOT NULL,
+      approval_state text NOT NULL DEFAULT 'PENDING_APPROVAL',
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (packet_id, question_id)
+    )`);
+
+    await client.query(`CREATE TABLE IF NOT EXISTS knowledge_audit_events (
+      id bigserial PRIMARY KEY,
+      entry_id text,
+      action text NOT NULL,
+      actor text NOT NULL,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS knowledge_audit_events_entry_idx ON knowledge_audit_events(entry_id, created_at DESC)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS knowledge_evaluation_runs (
+      id bigserial PRIMARY KEY,
+      evaluation_version text NOT NULL,
+      inserted_count integer NOT NULL DEFAULT 0,
+      updated_count integer NOT NULL DEFAULT 0,
+      unchanged_count integer NOT NULL DEFAULT 0,
+      cluster_count integer NOT NULL DEFAULT 0,
+      material_hash text NOT NULL,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS knowledge_evaluation_runs_created_idx ON knowledge_evaluation_runs(created_at DESC)"
+    );
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS knowledge_evaluation_runs_material_idx ON knowledge_evaluation_runs(material_hash)"
+    );
+
+    // M5: natural titles + intent-native briefs (additive; no AUTO decision mutation)
+    await client.query(`CREATE TABLE IF NOT EXISTS natural_title_proposals (
+      id text PRIMARY KEY,
+      cluster_id text,
+      canonical_reader_task_id text NOT NULL,
+      title text NOT NULL,
+      pattern_family text NOT NULL,
+      reader_question text NOT NULL,
+      rationale text NOT NULL DEFAULT '',
+      evidence_gated boolean NOT NULL DEFAULT false,
+      blocked_claim_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+      diversity_ok boolean NOT NULL DEFAULT true,
+      diversity_share double precision NOT NULL DEFAULT 0,
+      banned_template boolean NOT NULL DEFAULT false,
+      title_version text NOT NULL,
+      material_hash text NOT NULL,
+      payload jsonb NOT NULL,
+      pipeline_versions jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS natural_title_proposals_cluster_idx ON natural_title_proposals(cluster_id)"
+    );
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS natural_title_proposals_family_idx ON natural_title_proposals(pattern_family)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS intent_native_briefs (
+      id text PRIMARY KEY,
+      cluster_id text,
+      canonical_reader_task_id text NOT NULL,
+      title_proposal_id text NOT NULL,
+      proposed_title text NOT NULL,
+      reader_question text NOT NULL,
+      decision_hint text NOT NULL
+        CHECK (decision_hint IN ('DRAFT_CANDIDATE','NEEDS_EVIDENCE','NEEDS_MERCHANT_INPUT','BLOCKED')),
+      brief_version text NOT NULL,
+      material_hash text NOT NULL,
+      payload jsonb NOT NULL,
+      pipeline_versions jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS intent_native_briefs_cluster_idx ON intent_native_briefs(cluster_id)"
+    );
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS intent_native_briefs_hint_idx ON intent_native_briefs(decision_hint)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS title_generation_runs (
+      id bigserial PRIMARY KEY,
+      title_version text NOT NULL,
+      brief_version text NOT NULL,
+      inserted_count integer NOT NULL DEFAULT 0,
+      unchanged_count integer NOT NULL DEFAULT 0,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS title_generation_runs_created_idx ON title_generation_runs(created_at DESC)"
+    );
+
     await client.query(
       `INSERT INTO schema_migrations(id) VALUES
         ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research'),
-        ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim')
+        ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim'),
+        ('007_rollout_draft_counted_unique'), ('008_source_evidence_reader_tasks'),
+        ('009_evidence_approval_authority'), ('010_opportunity_clusters'),
+        ('011_knowledge_registry'), ('012_natural_title_briefs')
        ON CONFLICT DO NOTHING`
     );
 

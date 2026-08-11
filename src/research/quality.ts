@@ -1,7 +1,16 @@
 import { countWords } from "../content.js";
+import { evaluatePreGeneration } from "./editorialControls.js";
 import { runEditorialReview } from "./editorial.js";
-import { validateInternalLinks, type InternalLinkCandidate } from "./links.js";
+import { validateInternalLinks, type InternalLinkCandidate, assessInternalLinkRelevance } from "./links.js";
+import {
+  assessGeneratedArticleSemantics,
+  assessSemanticAlignment,
+  isQuarantinedArticle
+} from "./semanticIntent.js";
+import { assessSalesContentLimits } from "./salesLimits.js";
 import { buildSeoDeliverables, validateSeoDeliverables } from "./seo.js";
+import { assessTechnicalAccuracy } from "./technicalRules.js";
+import { assessTemplateFiller } from "./templateDetection.js";
 import type { ArticleBrief, EvidenceReport } from "./types.js";
 
 export interface GeneratedDraftFields {
@@ -48,6 +57,164 @@ export function runQualityGates(args: {
     detail: "Reject generic Practical Guide titles.",
     severity: "major"
   });
+
+  const incoherentFraming = isQuarantinedArticle(args.draft.title, args.brief.primaryKeyword);
+  results.push({
+    gate: "content_promise_coherence",
+    ok: !incoherentFraming,
+    detail: incoherentFraming
+      ? "Keyword/title framing cannot fulfill a coherent content promise."
+      : "Content-promise framing is coherent.",
+    severity: "critical"
+  });
+
+  const factBlob = [
+    ...(args.brief.factSheet.businessFacts || []),
+    ...(args.brief.factSheet.legendsFacts || []),
+    ...(args.brief.factSheet.productFacts || [])
+  ].join(" ");
+  const promiseEval = evaluatePreGeneration({
+    primaryKeyword: args.brief.primaryKeyword,
+    proposedTitle: args.draft.title,
+    audienceLabel: args.brief.targetAudienceLabel,
+    readerQuestion: args.brief.readerQuestion,
+    outline: args.brief.proposedOutline,
+    whyDistinct: args.brief.whyDistinct,
+    conversionPath: args.brief.conversionPath,
+    format: args.brief.format,
+    intent: args.brief.searchIntent,
+    pillar: args.brief.pillar,
+    factSheet: args.brief.factSheet,
+    interviewComplete: Boolean(args.interviewApproved),
+    hasTechnicalFacts:
+      args.brief.factSheet.productFacts.length > 0 ||
+      /\b(dtf|embroidery|screen print|uv dtf|gang sheet|transfer)\b/i.test(factBlob),
+    hasLocalFacts: /\b(warner|georgia|local)\b/i.test(factBlob + " " + args.brief.primaryKeyword),
+    hasVerifiedPrices: /\b(price|cost|\$)\b/i.test(factBlob) && /\b(current|approved|as of)\b/i.test(factBlob),
+    disableAutoRefine: true
+  });
+  // Post-generation: evidence/depth already gated pre-generation for AUTO/DRAFT briefs.
+  // Fail only when the draft's framing is still unsupported (not when brief was already routed).
+  const evidenceOk =
+    promiseEval.evidenceBudget.supportsCentralPromise ||
+    promiseEval.decision === "NEEDS_MERCHANT_INPUT" ||
+    args.brief.decision === "DRAFT_ONLY" ||
+    args.brief.decision === "AUTO_ELIGIBLE";
+  results.push({
+    gate: "evidence_budget",
+    ok: evidenceOk,
+    detail: evidenceOk
+      ? "Evidence budget supports the central promise (or brief already routed)."
+      : promiseEval.evidenceBudget.missingEvidence.join("; ") || promiseEval.evidenceBudget.reasons.join(" "),
+    severity: "critical"
+  });
+  const depthOk =
+    promiseEval.depth.ok ||
+    promiseEval.decision === "NEEDS_MERCHANT_INPUT" ||
+    (args.brief.decision === "DRAFT_ONLY" && promiseEval.depth.score >= 0.55);
+  results.push({
+    gate: "depth_information_gain",
+    ok: depthOk,
+    detail: depthOk
+      ? "Brief/draft depth and information gain are adequate."
+      : promiseEval.depth.reasons.join(" "),
+    severity: "major"
+  });
+
+  const preGenSemantic = assessSemanticAlignment({
+    primaryKeyword: args.brief.primaryKeyword,
+    proposedTitle: args.draft.title,
+    readerQuestion: args.brief.readerQuestion,
+    audienceLabel: args.brief.targetAudienceLabel,
+    outline: args.brief.proposedOutline,
+    whyDistinct: args.brief.whyDistinct,
+    conversionPath: args.brief.conversionPath,
+    searchIntent: args.brief.searchIntent,
+    format: args.brief.format,
+    productTitles: args.brief.productsToFeature.map(p => p.title)
+  });
+  results.push({
+    gate: "semantic_intent_alignment",
+    ok: preGenSemantic.ok && !incoherentFraming,
+    detail: preGenSemantic.ok
+      ? "Keyword, reader, title, outline, and conversion path are aligned."
+      : preGenSemantic.reasons.join(" "),
+    severity: "critical"
+  });
+
+  const technical = assessTechnicalAccuracy(args.draft.bodyHtml);
+  for (const finding of technical) {
+    results.push({
+      gate: `technical_${finding.gate}`,
+      ok: finding.severity === "minor",
+      detail: finding.detail,
+      severity: finding.severity
+    });
+  }
+
+  const sales = assessSalesContentLimits({
+    bodyHtml: args.draft.bodyHtml,
+    title: args.draft.title,
+    primaryKeyword: args.brief.primaryKeyword,
+    intent: args.brief.searchIntent,
+    businessFacts: args.brief.factSheet.legendsFacts || args.brief.factSheet.businessFacts,
+    productTitles: args.brief.productsToFeature.map(p => p.title)
+  });
+  results.push({
+    gate: "sales_content_limits",
+    ok: sales.ok,
+    detail: sales.ok
+      ? "Brand/CTA density within limits."
+      : sales.reasons.join(" "),
+    severity: "major"
+  });
+
+  const template = assessTemplateFiller({
+    title: args.draft.title,
+    primaryKeyword: args.brief.primaryKeyword,
+    bodyHtml: args.draft.bodyHtml,
+    outline: args.brief.proposedOutline
+  });
+  results.push({
+    gate: "template_filler",
+    ok: template.ok,
+    detail: template.ok ? "No template-filler pattern detected." : template.reasons.join(" "),
+    severity: "major"
+  });
+
+  const linkRelevance = assessInternalLinkRelevance({
+    primaryKeyword: args.brief.primaryKeyword,
+    title: args.draft.title,
+    readerQuestion: args.brief.readerQuestion,
+    productTitles: args.brief.productsToFeature.map(p => p.title),
+    bodyHtml: args.draft.bodyHtml
+  });
+  results.push({
+    gate: "internal_link_relevance",
+    ok: linkRelevance.ok,
+    detail: linkRelevance.ok
+      ? "Internal product links are relevant to the article intent."
+      : linkRelevance.reasons.join(" "),
+    severity: "major"
+  });
+
+  // Surface post-generation semantic/technical findings as quality gates too
+  const generatedSemantics = assessGeneratedArticleSemantics({
+    title: args.draft.title,
+    primaryKeyword: args.brief.primaryKeyword,
+    bodyHtml: args.draft.bodyHtml,
+    businessFacts: args.brief.factSheet.legendsFacts || args.brief.factSheet.businessFacts,
+    productTitles: args.brief.productsToFeature.map(p => p.title),
+    audienceLabel: args.brief.targetAudienceLabel
+  });
+  for (const finding of generatedSemantics.findings) {
+    results.push({
+      gate: `semantic_${finding.gate}`,
+      ok: finding.severity === "minor",
+      detail: finding.detail,
+      severity: finding.severity
+    });
+  }
 
   results.push({
     gate: "placeholder_outline",
@@ -184,7 +351,10 @@ export function runQualityGates(args: {
     brokenLinks: linkCheck.broken,
     overlapScore: args.brief.overlapScore,
     hasPlaceholderLanguage: /practical steps or comparisons|lorem ipsum|TODO:/i.test(bodyText),
-    demandLabel: args.brief.demandEvidence
+    demandLabel: args.brief.demandEvidence,
+    audienceLabel: args.brief.targetAudienceLabel,
+    businessFacts: args.brief.factSheet.legendsFacts || args.brief.factSheet.businessFacts,
+    productTitles: args.brief.productsToFeature.map(p => p.title)
   });
 
   return {
