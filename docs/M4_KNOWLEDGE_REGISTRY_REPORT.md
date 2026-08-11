@@ -1,6 +1,6 @@
 # M4 Report — Evidence and approved-knowledge registry
 
-**Commit basis:** M4 claim-safety correction on `cursor/topic-research-engine-338a` (after unaccepted tip `add5c82`; M3 accepted at `e58c548`)  
+**Commit basis:** M4 SourceEvidence fail-closed correction on `cursor/topic-research-engine-338a` (after freshness/authority tip `634cd14`; M3 accepted at `e58c548`)  
 **PR #7:** remain Draft  
 **Production behavior:** unchanged (paused `draft_only`; no AUTO_ELIGIBLE; no titles/briefs/articles from this milestone)
 
@@ -26,7 +26,7 @@ Migration id: `011_knowledge_registry` (additive in `src/db.ts`).
 | `knowledge_evaluation_runs` | Operational evaluation run accounting |
 
 Pipeline pin: `knowledge.v1.approved-claim-budget` (`PIPELINE_VERSIONS.knowledgeRegistry`).  
-Evaluation version: `knowledgeEval.v1.1.claim-safety` (claim-safety correction after tip `add5c82`).
+Evaluation version: `knowledgeEval.v1.2.source-evidence-allowlist` (SourceEvidence allowlist + required scope; builds on claim-safety correction).
 
 **M4 does not mutate legacy `research_opportunities` or reservations.**
 
@@ -125,15 +125,19 @@ Strict rules enforced in `knowledgeEvaluation.ts`:
 
 Before attaching SourceEvidence for partial support, evaluation validates:
 
-- allowed source type
+- **explicit claim-aware source-type allowlist** (unknown, misspelled, or future types fail closed — not a blocklist)
 - active approval
 - public-usage permission
 - freshness (especially for time-sensitive claims)
-- process surface
-- geographic scope
+- **required applicable processSurface** for technical, safety, product-behavior, and other scope-sensitive / specific-process claims
+- **required applicable geographicScope** where geography affects applicability (local/national claims)
 - claim-class suitability
 
+Missing required scope cannot attach. `unspecified` cannot satisfy a specific apparel, UV DTF, embroidery, local, or national claim. Explicit `general` process scope is valid only when the claim is genuinely process-independent.
+
 **Customer-question evidence proves that customers ask something (demand). It is not technical or factual answer evidence** and cannot partially support technical, safety, price, turnaround, policy, or comparison claims.
+
+Allowlisted attachment types are enumerated in `SOURCE_EVIDENCE_ATTACHMENT_TYPES` / `allowedSourceTypesForClaimAttachment()`. Adding a future source type requires an explicit policy update there.
 
 ---
 
@@ -228,5 +232,7 @@ Corpus covers approval boundary, pending/revoked/stale, numeric cost, model-infe
 - manufacturer scope match/mismatch
 - merchant observation vs general technical fact
 - customer-question SourceEvidence cannot act as technical answer evidence
+- SourceEvidence attachment uses an explicit claim-aware allowlist (unknown/misspelled types fail closed)
+- required process/geography scope for scope-sensitive claims (missing/`unspecified` cannot attach)
 
 Run: `npm run typecheck && npm test && npm run build`

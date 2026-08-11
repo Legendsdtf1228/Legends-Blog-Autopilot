@@ -9,17 +9,21 @@ import { deriveClaimRequirementsFromCluster } from "./claimRequirements.js";
 import { isActivelyApprovedKnowledge } from "./knowledgeApproval.js";
 import {
   assessKnowledgeFreshness,
+  allowedSourceTypesForClaimAttachment,
   claimClassAllowsSource,
   claimRelevanceScore,
   claimRequiresExplicitFreshness,
   factsContradict,
   geographyCompatible,
   hasUsableNumericEvidence,
+  isKnownSourceEvidenceAttachmentType,
   isObservationScopedFact,
   knowledgeClassAligns,
   processSurfacesCompatible,
   resolveKnowledgePrecedence,
   sourceAuthorityRank,
+  sourceEvidenceGeographicScopeAllows,
+  sourceEvidenceProcessScopeAllows,
   type FreshnessAssessment
 } from "./knowledgeAuthority.js";
 import {
@@ -118,7 +122,9 @@ function inferEvidenceRole(src: ActiveSourceEvidenceStub): SourceEvidenceRole {
 
 /**
  * Validate SourceEvidence before any partial-support attachment.
+ * Uses an explicit claim-aware source-type allowlist (unknown types fail closed).
  * Customer-question evidence may prove demand, never technical answer evidence.
+ * Scope-sensitive claims require explicit applicable process/geography metadata.
  */
 export function sourceEvidenceMayAttachToClaim(
   src: ActiveSourceEvidenceStub,
@@ -134,14 +140,11 @@ export function sourceEvidenceMayAttachToClaim(
     return { ok: false, reason: "source evidence lacks public-usage permission" };
   }
 
-  const blockedTypes = new Set([
-    "inferred_seed",
-    "model_inference",
-    "template_example",
-    "unsupported_assertion"
-  ]);
-  if (blockedTypes.has(src.sourceType)) {
-    return { ok: false, reason: `sourceType ${src.sourceType} cannot attach to claims` };
+  if (!isKnownSourceEvidenceAttachmentType(src.sourceType)) {
+    return {
+      ok: false,
+      reason: `unknown or unlisted sourceType "${src.sourceType}" cannot attach; explicit allowlist policy required`
+    };
   }
 
   const role = inferEvidenceRole(src);
@@ -154,7 +157,9 @@ export function sourceEvidenceMayAttachToClaim(
       claimClass === "turnaround" ||
       claimClass === "merchant_policy" ||
       claimClass === "time_sensitive" ||
-      claimClass === "comparison_recommendation"
+      claimClass === "comparison_recommendation" ||
+      claimClass === "merchant_experience" ||
+      claimClass === "customer_result"
     ) {
       return {
         ok: false,
@@ -163,17 +168,12 @@ export function sourceEvidenceMayAttachToClaim(
     }
   }
 
-  if (claimClass === "technical" || claimClass === "safety_compliance") {
-    if (
-      src.sourceType !== "authoritative_technical_source" &&
-      src.sourceType !== "manufacturer_documentation" &&
-      src.sourceType !== "public_government_standards"
-    ) {
-      return {
-        ok: false,
-        reason: "technical/safety partial support requires authoritative SourceEvidence types"
-      };
-    }
+  const allowedTypes = allowedSourceTypesForClaimAttachment(claimClass);
+  if (!allowedTypes.has(src.sourceType)) {
+    return {
+      ok: false,
+      reason: `sourceType ${src.sourceType} is not on the allowlist for claim class ${claimClass}`
+    };
   }
 
   if (claimRequiresExplicitFreshness(claimClass)) {
@@ -186,13 +186,11 @@ export function sourceEvidenceMayAttachToClaim(
     return { ok: false, reason: "source evidence is stale" };
   }
 
-  if (src.processSurface && !processSurfacesCompatible(src.processSurface, surface)) {
-    return { ok: false, reason: "source evidence process surface does not match claim" };
-  }
-  if (src.geographicScope) {
-    const geoOk = geographyCompatible(src.geographicScope, geo);
-    if (!geoOk.ok) return { ok: false, reason: geoOk.reason || "geographic scope mismatch" };
-  }
+  const processScope = sourceEvidenceProcessScopeAllows(src.processSurface, surface, claimClass);
+  if (!processScope.ok) return { ok: false, reason: processScope.reason };
+
+  const geoScope = sourceEvidenceGeographicScopeAllows(src.geographicScope, geo, claimClass);
+  if (!geoScope.ok) return { ok: false, reason: geoScope.reason };
 
   return { ok: true, reason: "eligible" };
 }

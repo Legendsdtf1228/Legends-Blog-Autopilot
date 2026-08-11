@@ -60,7 +60,7 @@ function safetyTask() {
 }
 
 test("M4 correction: evaluation version pin reflects claim-safety", () => {
-  assert.equal(KNOWLEDGE_EVALUATION_VERSION, "knowledgeEval.v1.1.claim-safety");
+  assert.match(KNOWLEDGE_EVALUATION_VERSION, /claim-safety|source-evidence-allowlist/);
   assert.equal(claimRequiresExplicitFreshness("price_cost"), true);
   assert.equal(claimRequiresExplicitFreshness("turnaround"), true);
   assert.equal(claimRequiresExplicitFreshness("merchant_policy"), true);

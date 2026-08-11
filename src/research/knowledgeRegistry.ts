@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import type { PipelineVersionStamp } from "./versioning.js";
 
 export const KNOWLEDGE_ENTRY_SCHEMA_VERSION = "knowledgeEntry.v1";
-export const KNOWLEDGE_EVALUATION_VERSION = "knowledgeEval.v1.1.claim-safety";
+export const KNOWLEDGE_EVALUATION_VERSION = "knowledgeEval.v1.2.source-evidence-allowlist";
 
 export type KnowledgeClass =
   | "dtf_shop_operations"

@@ -493,3 +493,205 @@ export function knowledgeClassAligns(claimClass: ClaimClass, knowledgeClass: Kno
 export function hasUsableNumericEvidence(text: string): boolean {
   return /\$?\d+(?:\.\d+)?/.test(text);
 }
+
+/**
+ * Explicit SourceEvidence source-type catalog for attachment policy.
+ * Unknown / misspelled / future types fail closed until an explicit allowlist update.
+ */
+export const SOURCE_EVIDENCE_ATTACHMENT_TYPES = [
+  "approved_merchant_firsthand",
+  "approved_business_fact_or_policy",
+  "active_first_party_customer_evidence",
+  "authoritative_technical_source",
+  "manufacturer_documentation",
+  "public_government_standards"
+] as const;
+
+export type SourceEvidenceAttachmentType = (typeof SOURCE_EVIDENCE_ATTACHMENT_TYPES)[number];
+
+const SOURCE_EVIDENCE_ATTACHMENT_TYPE_SET = new Set<string>(SOURCE_EVIDENCE_ATTACHMENT_TYPES);
+
+export function isKnownSourceEvidenceAttachmentType(sourceType: string): sourceType is SourceEvidenceAttachmentType {
+  return SOURCE_EVIDENCE_ATTACHMENT_TYPE_SET.has(sourceType);
+}
+
+/**
+ * Claim-aware allowlist for SourceEvidence attachment.
+ * Not present here ⇒ cannot attach. Extending requires an explicit policy decision in this function.
+ */
+export function allowedSourceTypesForClaimAttachment(claimClass: ClaimClass): ReadonlySet<SourceEvidenceAttachmentType> {
+  switch (claimClass) {
+    case "technical":
+    case "safety_compliance":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards"
+      ]);
+    case "product_behavior":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards",
+        "approved_merchant_firsthand"
+      ]);
+    case "price_cost":
+    case "turnaround":
+    case "merchant_policy":
+    case "time_sensitive":
+      return new Set([
+        "approved_business_fact_or_policy",
+        "approved_merchant_firsthand",
+        "manufacturer_documentation",
+        "authoritative_technical_source"
+      ]);
+    case "merchant_experience":
+      return new Set(["approved_merchant_firsthand"]);
+    case "customer_result":
+      return new Set(["active_first_party_customer_evidence", "approved_merchant_firsthand"]);
+    case "local_claim":
+      return new Set([
+        "approved_business_fact_or_policy",
+        "approved_merchant_firsthand",
+        "active_first_party_customer_evidence",
+        "authoritative_technical_source"
+      ]);
+    case "comparison_recommendation":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards",
+        "approved_merchant_firsthand",
+        "approved_business_fact_or_policy"
+      ]);
+    case "general_educational":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards",
+        "approved_business_fact_or_policy",
+        "approved_merchant_firsthand",
+        "active_first_party_customer_evidence"
+      ]);
+    default:
+      // Unknown claim classes fail closed.
+      return new Set();
+  }
+}
+
+export function claimRequiresExplicitProcessScope(
+  claimClass: ClaimClass,
+  claimSurface: ProcessSurfaceScope
+): boolean {
+  if (
+    claimClass === "technical" ||
+    claimClass === "safety_compliance" ||
+    claimClass === "product_behavior" ||
+    claimClass === "comparison_recommendation"
+  ) {
+    return true;
+  }
+  return (
+    claimSurface === "apparel_dtf" ||
+    claimSurface === "uv_dtf_hard_surface" ||
+    claimSurface === "embroidery"
+  );
+}
+
+export function claimRequiresExplicitGeographicScope(
+  claimClass: ClaimClass,
+  claimGeo: GeographicKnowledgeScope
+): boolean {
+  if (claimClass === "local_claim") return true;
+  return claimGeo === "local" || claimGeo === "national";
+}
+
+/**
+ * Strict process-scope gate for SourceEvidence attachment (missing scope fails closed when required).
+ */
+export function sourceEvidenceProcessScopeAllows(
+  evidenceSurface: ProcessSurfaceScope | undefined | null,
+  claimSurface: ProcessSurfaceScope,
+  claimClass: ClaimClass
+): { ok: boolean; reason: string } {
+  const required = claimRequiresExplicitProcessScope(claimClass, claimSurface);
+  const specificClaim =
+    claimSurface === "apparel_dtf" ||
+    claimSurface === "uv_dtf_hard_surface" ||
+    claimSurface === "embroidery";
+
+  if (required) {
+    if (evidenceSurface == null) {
+      return { ok: false, reason: "missing required processSurface for scope-sensitive claim" };
+    }
+    if (evidenceSurface === "unspecified") {
+      return {
+        ok: false,
+        reason: "unspecified processSurface cannot satisfy a specific apparel, UV DTF, or embroidery claim"
+      };
+    }
+    if (specificClaim) {
+      if (evidenceSurface === "general") {
+        return {
+          ok: false,
+          reason: "general process scope cannot satisfy a specific apparel/UV DTF/embroidery claim"
+        };
+      }
+      if (evidenceSurface !== claimSurface) {
+        return { ok: false, reason: `process surface mismatch (${evidenceSurface} vs ${claimSurface})` };
+      }
+      return { ok: true, reason: "process scope matches" };
+    }
+    // Claim is process-independent (general/unspecified): explicit general is valid; specific also OK.
+    if (evidenceSurface === "general" || evidenceSurface === "apparel_dtf" || evidenceSurface === "uv_dtf_hard_surface" || evidenceSurface === "embroidery") {
+      return { ok: true, reason: "process scope acceptable for process-independent claim" };
+    }
+    return { ok: false, reason: `unsupported processSurface ${evidenceSurface}` };
+  }
+
+  // Not required — if present, still must not hard-conflict.
+  if (evidenceSurface != null) {
+    if (specificClaim && evidenceSurface === "unspecified") {
+      return {
+        ok: false,
+        reason: "unspecified processSurface cannot satisfy a specific process claim"
+      };
+    }
+    if (!processSurfacesCompatible(evidenceSurface, claimSurface)) {
+      return { ok: false, reason: "process surface mismatch" };
+    }
+  }
+  return { ok: true, reason: "process scope not required or compatible" };
+}
+
+/**
+ * Strict geography gate for SourceEvidence attachment (missing scope fails closed when required).
+ */
+export function sourceEvidenceGeographicScopeAllows(
+  evidenceGeo: GeographicKnowledgeScope | undefined | null,
+  claimGeo: GeographicKnowledgeScope,
+  claimClass: ClaimClass
+): { ok: boolean; reason: string } {
+  const required = claimRequiresExplicitGeographicScope(claimClass, claimGeo);
+
+  if (required) {
+    if (evidenceGeo == null) {
+      return { ok: false, reason: "missing required geographicScope for geography-sensitive claim" };
+    }
+    if (evidenceGeo === "unspecified") {
+      return {
+        ok: false,
+        reason: "unspecified geographicScope cannot satisfy a local or national claim"
+      };
+    }
+    const geo = geographyCompatible(evidenceGeo, claimGeo);
+    if (!geo.ok) return { ok: false, reason: geo.reason || "geographic scope mismatch" };
+    return { ok: true, reason: "geographic scope matches" };
+  }
+
+  if (evidenceGeo != null) {
+    const geo = geographyCompatible(evidenceGeo, claimGeo);
+    if (!geo.ok) return { ok: false, reason: geo.reason || "geographic scope mismatch" };
+  }
+  return { ok: true, reason: "geographic scope not required or compatible" };
+}
