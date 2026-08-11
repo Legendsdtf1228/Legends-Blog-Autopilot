@@ -74,8 +74,8 @@ export function geographyCompatible(
 
 export function claimClassAllowsSource(
   claimClass: ClaimClass,
-  entry: Pick<KnowledgeEntry, "sourceType" | "firsthand" | "publicUsageAllowed">
-): { ok: boolean; reason?: string } {
+  entry: Pick<KnowledgeEntry, "sourceType" | "firsthand" | "publicUsageAllowed" | "exactApprovedFact">
+): { ok: boolean; reason?: string; observationOnly?: boolean } {
   if (!sourceTypeCanSatisfyClaims(entry.sourceType)) {
     return { ok: false, reason: `${entry.sourceType} cannot satisfy claims` };
   }
@@ -100,6 +100,7 @@ export function claimClassAllowsSource(
     case "price_cost":
     case "turnaround":
     case "merchant_policy":
+    case "time_sensitive":
       if (
         entry.sourceType !== "approved_business_fact_or_policy" &&
         entry.sourceType !== "approved_merchant_firsthand" &&
@@ -110,27 +111,160 @@ export function claimClassAllowsSource(
       }
       return { ok: true };
     case "technical":
+      // Approval is not technical authority — only authoritative/manufacturer/standards sources.
+      if (
+        entry.sourceType === "authoritative_technical_source" ||
+        entry.sourceType === "manufacturer_documentation" ||
+        entry.sourceType === "public_government_standards"
+      ) {
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        reason:
+          "technical specifications require manufacturer documentation, authoritative technical sources, or government/standards sources"
+      };
     case "safety_compliance":
+      if (
+        entry.sourceType === "authoritative_technical_source" ||
+        entry.sourceType === "manufacturer_documentation" ||
+        entry.sourceType === "public_government_standards"
+      ) {
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        reason:
+          "safety/compliance claims require authoritative or government/standards support; shop policy/approval is not safety authority"
+      };
     case "product_behavior":
       if (
-        entry.sourceType !== "authoritative_technical_source" &&
-        entry.sourceType !== "manufacturer_documentation" &&
-        entry.sourceType !== "public_government_standards" &&
-        entry.sourceType !== "approved_merchant_firsthand" &&
-        entry.sourceType !== "approved_business_fact_or_policy"
+        entry.sourceType === "authoritative_technical_source" ||
+        entry.sourceType === "manufacturer_documentation" ||
+        entry.sourceType === "public_government_standards"
       ) {
-        return { ok: false, reason: "technical/safety claims require authoritative or approved shop sources" };
+        return { ok: true };
       }
-      return { ok: true };
+      if (entry.sourceType === "approved_merchant_firsthand" && entry.firsthand === true) {
+        // Merchant observations may qualify product behavior only as scoped observations — not general technical fact.
+        return {
+          ok: true,
+          observationOnly: true,
+          reason: "merchant observation may qualify product behavior only when scoped as observation"
+        };
+      }
+      return {
+        ok: false,
+        reason: "product-behavior claims require authoritative support or scoped merchant observation"
+      };
     case "local_claim":
       return { ok: true };
     case "comparison_recommendation":
     case "general_educational":
-    case "time_sensitive":
       return { ok: true };
     default:
       return { ok: true };
   }
+}
+
+/** True when a claim class requires explicit freshness metadata (not approval date alone). */
+export function claimRequiresExplicitFreshness(claimClass: ClaimClass): boolean {
+  return (
+    claimClass === "price_cost" ||
+    claimClass === "turnaround" ||
+    claimClass === "merchant_policy" ||
+    claimClass === "time_sensitive"
+  );
+}
+
+export type FreshnessAssessmentStatus = "fresh" | "aging" | "stale" | "unknown" | "not_yet_effective";
+
+export interface FreshnessAssessment {
+  status: FreshnessAssessmentStatus;
+  reason: string;
+}
+
+/**
+ * Assess freshness. For time-sensitive claims, approval date alone never establishes indefinite freshness.
+ * Requires applicable effectiveFrom/checked date plus a freshness window or effectiveTo expiration.
+ */
+export function assessKnowledgeFreshness(
+  entry: Pick<
+    KnowledgeEntry,
+    "approvalState" | "effectiveFrom" | "effectiveTo" | "freshnessPolicyDays" | "approvedAt"
+  >,
+  now: Date,
+  opts: { timeSensitive: boolean }
+): FreshnessAssessment {
+  if (entry.approvalState === "STALE") {
+    return { status: "stale", reason: "approvalState is STALE" };
+  }
+
+  const fromMs = entry.effectiveFrom ? Date.parse(entry.effectiveFrom) : NaN;
+  const toMs = entry.effectiveTo ? Date.parse(entry.effectiveTo) : NaN;
+  const hasFrom = !Number.isNaN(fromMs);
+  const hasTo = !Number.isNaN(toMs);
+  const hasWindow = entry.freshnessPolicyDays != null && Number.isFinite(entry.freshnessPolicyDays);
+
+  if (opts.timeSensitive) {
+    if (!hasFrom) {
+      return {
+        status: "unknown",
+        reason: "time-sensitive fact missing effectiveFrom/checked date; remains UNKNOWN"
+      };
+    }
+    if (!hasTo && !hasWindow) {
+      return {
+        status: "unknown",
+        reason: "time-sensitive fact missing freshness window or effectiveTo; approval date alone is insufficient"
+      };
+    }
+    if (fromMs > now.getTime()) {
+      return { status: "not_yet_effective", reason: "effectiveFrom is in the future; not currently usable" };
+    }
+    if (hasTo && toMs < now.getTime()) {
+      return { status: "stale", reason: "effectiveTo expired" };
+    }
+    if (hasWindow) {
+      const ageDays = (now.getTime() - fromMs) / 86400000;
+      if (ageDays > (entry.freshnessPolicyDays as number)) {
+        return { status: "stale", reason: "freshness window exceeded from effectiveFrom" };
+      }
+      if (ageDays > (entry.freshnessPolicyDays as number) * 0.7) {
+        return { status: "aging", reason: "within freshness window but aging" };
+      }
+    }
+    return { status: "fresh", reason: "within explicit freshness metadata" };
+  }
+
+  // Timeless / non-time-sensitive knowledge may remain usable without a price-style freshness window.
+  if (hasTo && toMs < now.getTime()) {
+    return { status: "stale", reason: "effectiveTo expired" };
+  }
+  if (hasFrom && fromMs > now.getTime()) {
+    return { status: "not_yet_effective", reason: "effectiveFrom is in the future" };
+  }
+  if (hasWindow && hasFrom) {
+    const ageDays = (now.getTime() - fromMs) / 86400000;
+    if (ageDays > (entry.freshnessPolicyDays as number)) {
+      return { status: "stale", reason: "optional freshness window exceeded" };
+    }
+    if (ageDays > (entry.freshnessPolicyDays as number) * 0.7) {
+      return { status: "aging", reason: "within optional freshness window but aging" };
+    }
+    return { status: "fresh", reason: "within optional freshness window" };
+  }
+  return {
+    status: "fresh",
+    reason: "timeless knowledge; no price-style freshness window required"
+  };
+}
+
+/** Detect observation-scoped merchant wording (not a general technical assertion). */
+export function isObservationScopedFact(text: string): boolean {
+  return /\b(in our shop|at our shop|we observe|we have observed|our experience|our production|we saw|firsthand)\b/i.test(
+    text
+  );
 }
 
 export interface ContradictionRecord {
@@ -325,11 +459,19 @@ export function knowledgeClassAligns(claimClass: ClaimClass, knowledgeClass: Kno
       return knowledgeClass === "local_customer_needs";
     case "technical":
     case "product_behavior":
-    case "safety_compliance":
       return (
         knowledgeClass === "technical_specifications" ||
         knowledgeClass === "artwork_preparation_failures" ||
         knowledgeClass === "garment_selection" ||
+        knowledgeClass === "uv_dtf_vs_apparel_dtf"
+      );
+    case "safety_compliance":
+      // Include policy/ops classes so non-authoritative sources can be considered and explicitly rejected.
+      return (
+        knowledgeClass === "technical_specifications" ||
+        knowledgeClass === "artwork_preparation_failures" ||
+        knowledgeClass === "legends_policies" ||
+        knowledgeClass === "dtf_shop_operations" ||
         knowledgeClass === "uv_dtf_vs_apparel_dtf"
       );
     case "comparison_recommendation":

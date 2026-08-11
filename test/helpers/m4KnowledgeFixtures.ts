@@ -382,3 +382,194 @@ export function conflictingTurnaroundKnowledge(): KnowledgeEntry {
     })
   );
 }
+
+/** Approved price with numbers but no freshness policy — must not support time-sensitive claims. */
+export function oldApprovedPriceWithoutFreshnessPolicy(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "pricing_cost_facts",
+      normalizedClaim: "DTF 48-piece sample run cost range",
+      exactApprovedFact:
+        "A 48-piece apparel DTF sample run commonly budgets $180-$320 in transfer cost before blanks.",
+      scope: {
+        geographic: "national",
+        processSurface: "apparel_dtf",
+        audiences: ["clothing-brand owners"],
+        products: ["DTF transfers"],
+        exclusions: []
+      },
+      sourceType: "approved_business_fact_or_policy",
+      sourceReference: "fixture:m4:pricing-no-freshness",
+      provenance: "m4 correction fixture — missing freshness metadata",
+      confidence: "medium"
+      // intentionally no effectiveFrom / freshnessPolicyDays / effectiveTo
+    })
+  );
+}
+
+/** Current turnaround approved but missing freshness metadata. */
+export function turnaroundWithoutFreshnessMetadata(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "fulfillment_turnaround",
+      normalizedClaim: "Standard production turnaround before Friday deadlines",
+      exactApprovedFact:
+        "Standard apparel DTF production runs Monday through Friday; rush Friday delivery requires approval by Wednesday noon under current policy.",
+      scope: {
+        geographic: "national",
+        processSurface: "apparel_dtf",
+        audiences: ["school spirit coordinators"],
+        products: ["spirit shirts"],
+        exclusions: ["same-day guarantees"]
+      },
+      sourceType: "approved_business_fact_or_policy",
+      sourceReference: "fixture:m4:turnaround-no-freshness",
+      provenance: "m4 correction fixture — missing freshness metadata",
+      confidence: "high"
+    })
+  );
+}
+
+export function futureEffectivePolicy(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "legends_policies",
+      normalizedClaim: "Production day policy before Friday deadlines",
+      exactApprovedFact:
+        "Updated policy: apparel DTF production runs Tuesday through Saturday starting next season.",
+      scope: {
+        geographic: "national",
+        processSurface: "apparel_dtf",
+        audiences: ["school spirit coordinators"],
+        products: ["spirit shirts"],
+        exclusions: []
+      },
+      sourceType: "approved_business_fact_or_policy",
+      sourceReference: "fixture:m4:policy-future-effective",
+      provenance: "m4 correction fixture — future effectiveFrom",
+      confidence: "high",
+      effectiveFrom: "2027-01-01T00:00:00.000Z",
+      freshnessPolicyDays: 180
+    })
+  );
+}
+
+export function merchantOpinionTechnicalDpi(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "technical_specifications",
+      normalizedClaim: "Artwork DPI for apparel DTF",
+      exactApprovedFact: "We think 300 DPI at final print size is enough for apparel DTF logos.",
+      scope: {
+        geographic: "national",
+        processSurface: "apparel_dtf",
+        audiences: ["designers"],
+        products: ["artwork"],
+        exclusions: []
+      },
+      sourceType: "approved_merchant_firsthand",
+      sourceReference: "fixture:m4:merchant-dpi-opinion",
+      provenance: "m4 correction fixture — merchant opinion not technical authority",
+      firsthand: true,
+      confidence: "medium"
+    })
+  );
+}
+
+export function shopPolicyAsSafetyClaim(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "legends_policies",
+      normalizedClaim: "Wash and cure safety requirement for apparel DTF",
+      exactApprovedFact: "Shop policy requires customers to wash garments inside-out; we treat this as a safety rule.",
+      scope: {
+        geographic: "national",
+        processSurface: "apparel_dtf",
+        audiences: ["customers"],
+        products: ["apparel DTF"],
+        exclusions: []
+      },
+      sourceType: "approved_business_fact_or_policy",
+      sourceReference: "fixture:m4:policy-as-safety",
+      provenance: "m4 correction fixture — policy is not safety authority",
+      confidence: "medium",
+      effectiveFrom: "2026-07-01T00:00:00.000Z",
+      freshnessPolicyDays: 365
+    })
+  );
+}
+
+export function manufacturerDpiDocumentation(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "technical_specifications",
+      normalizedClaim: "Artwork DPI for apparel DTF at final print size",
+      exactApprovedFact:
+        "Manufacturer documentation specifies a minimum of 300 DPI at final print size for apparel DTF transfers.",
+      scope: {
+        geographic: "national",
+        processSurface: "apparel_dtf",
+        audiences: ["designers"],
+        products: ["artwork", "DTF transfers"],
+        exclusions: ["UV DTF hard-surface"]
+      },
+      sourceType: "manufacturer_documentation",
+      sourceReference: "fixture:m4:mfr-dpi-apparel",
+      provenance: "m4 correction fixture — manufacturer documentation",
+      confidence: "high"
+    })
+  );
+}
+
+export function manufacturerDpiUvOnly(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "technical_specifications",
+      normalizedClaim: "Artwork DPI for UV DTF hard-surface",
+      exactApprovedFact:
+        "Manufacturer UV DTF documentation specifies 400 DPI for hard-surface tumbler artwork at final size.",
+      scope: {
+        geographic: "national",
+        processSurface: "uv_dtf_hard_surface",
+        audiences: ["designers"],
+        products: ["tumblers"],
+        exclusions: ["apparel DTF"]
+      },
+      sourceType: "manufacturer_documentation",
+      sourceReference: "fixture:m4:mfr-dpi-uv",
+      provenance: "m4 correction fixture — UV scope only",
+      confidence: "high"
+    })
+  );
+}
+
+export function merchantObservationProductBehavior(): KnowledgeEntry {
+  return approveFixture(
+    buildPendingKnowledgeEntry({
+      fixtureLabel: M4_FIXTURE_LABEL,
+      knowledgeClass: "dtf_shop_operations",
+      normalizedClaim: "Observed cotton blank print hand-feel in our shop",
+      exactApprovedFact:
+        "In our shop we have observed that cotton blanks print with a softer hand-feel than polyester under the same apparel DTF settings.",
+      scope: {
+        geographic: "national",
+        processSurface: "apparel_dtf",
+        audiences: ["print shop owners"],
+        products: ["cotton blanks", "polyester blanks"],
+        exclusions: ["general manufacturer specification"]
+      },
+      sourceType: "approved_merchant_firsthand",
+      sourceReference: "fixture:m4:merchant-observation-handfeel",
+      provenance: "m4 correction fixture — scoped observation",
+      firsthand: true,
+      confidence: "medium"
+    })
+  );
+}

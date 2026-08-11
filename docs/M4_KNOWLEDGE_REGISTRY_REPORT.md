@@ -1,6 +1,6 @@
 # M4 Report — Evidence and approved-knowledge registry
 
-**Commit basis:** M4 on `cursor/topic-research-engine-338a` after accepted M3 `e58c548`  
+**Commit basis:** M4 claim-safety correction on `cursor/topic-research-engine-338a` (after unaccepted tip `add5c82`; M3 accepted at `e58c548`)  
 **PR #7:** remain Draft  
 **Production behavior:** unchanged (paused `draft_only`; no AUTO_ELIGIBLE; no titles/briefs/articles from this milestone)
 
@@ -26,7 +26,7 @@ Migration id: `011_knowledge_registry` (additive in `src/db.ts`).
 | `knowledge_evaluation_runs` | Operational evaluation run accounting |
 
 Pipeline pin: `knowledge.v1.approved-claim-budget` (`PIPELINE_VERSIONS.knowledgeRegistry`).  
-Evaluation version: `knowledgeEval.v1.claim-budget`.
+Evaluation version: `knowledgeEval.v1.1.claim-safety` (claim-safety correction after tip `add5c82`).
 
 **M4 does not mutate legacy `research_opportunities` or reservations.**
 
@@ -61,16 +61,42 @@ Modules: `knowledgeBuilders.ts`, `knowledgeApproval.ts`, `knowledgeStore.ts`.
 
 ## Source-authority rules
 
-Source types are distinct. Only approving types can satisfy claims:
+Source types are distinct. Seeds/templates/model inference cannot satisfy claims.
 
-| Can satisfy claims | Cannot satisfy claims |
+**Approval is not technical authority.** Claim-class gates:
+
+| Claim class | What can fully support |
 |---|---|
-| approved merchant firsthand | inferred seed |
-| approved business fact/policy | model inference |
-| active first-party customer evidence | template/example |
-| authoritative technical / manufacturer / government | unsupported assertion |
+| technical specifications | manufacturer documentation, authoritative technical sources, or government/standards |
+| safety/compliance | authoritative technical sources, manufacturer documentation, or government/standards |
+| product behavior | authoritative sources for general fact; merchant firsthand only as **scoped observation** (partial/qualified — never promoted to general technical fact) |
+| merchant experience | approved merchant firsthand |
+| price/cost, turnaround, merchant policy | approved business/policy or merchant firsthand (with explicit freshness) |
+| customer results | approved customer/firsthand evidence + public-usage permission |
+
+Merchant firsthand may describe observed shop experience. It cannot independently prove a general technical specification or safety rule. Approved business policy may prove a policy exists, not its technical correctness.
 
 Authority rank + scope match + approval + effective date + revision + confidence resolve diagnostic precedence. Material contradictions still **block** the claim (no silent “writeability” preference).
+
+---
+
+## Explicit freshness for time-sensitive facts
+
+Price, cost, turnaround, merchant policy, availability, and other `time_sensitive` claims **require explicit freshness metadata**:
+
+- applicable `effectiveFrom` / checked date **and**
+- a `freshnessPolicyDays` window **or** `effectiveTo` expiration
+
+Rules:
+
+- missing freshness metadata → `UNKNOWN` / unsupported (never supported)
+- expired `effectiveTo` or exceeded window from `effectiveFrom` → stale
+- future `effectiveFrom` → not currently usable
+- **approval date alone does not establish indefinite freshness**
+- timeless educational / comparison knowledge may remain usable without a price-style freshness window
+- time-sensitive SourceEvidence must pass the same freshness checks before attachment
+
+`assessKnowledgeFreshness()` implements this; evaluation version includes freshness in material hashes so identical evaluations stay idempotent on the same side of a freshness boundary and change when the boundary is crossed.
 
 ---
 
@@ -84,15 +110,30 @@ Each requirement stores evidence needed/found, supporting source/knowledge/revis
 
 Strict rules enforced in `knowledgeEvaluation.ts`:
 
-- price/cost → numeric approved or authoritative range
-- turnaround/policy → approved current business facts
+- price/cost → numeric approved evidence **plus** explicit freshness metadata
+- turnaround/policy → approved current business facts **plus** explicit freshness metadata
 - firsthand → approved merchant firsthand
 - customer results → approved evidence + public usage permission
-- technical → authoritative support (model inference insufficient)
+- technical/safety → authoritative/manufacturer/standards only (merchant opinion and shop policy insufficient)
+- product behavior → authoritative for general fact; merchant observation only when scoped/qualified
 - local → local scope only (not promoted nationally)
 - comparison → criteria/tradeoff evidence
 - UV DTF ≠ apparel DTF scope
 - missing evidence remains UNKNOWN / unsupported
+
+### SourceEvidence vs factual answer evidence
+
+Before attaching SourceEvidence for partial support, evaluation validates:
+
+- allowed source type
+- active approval
+- public-usage permission
+- freshness (especially for time-sensitive claims)
+- process surface
+- geographic scope
+- claim-class suitability
+
+**Customer-question evidence proves that customers ask something (demand). It is not technical or factual answer evidence** and cannot partially support technical, safety, price, turnaround, policy, or comparison claims.
 
 ---
 
@@ -180,6 +221,12 @@ AUTO starvation remains unresolved by design in M4.
 
 ## Test results
 
-Corpus covers approval boundary, pending/revoked/stale, numeric cost, model-inference technical, UV≠apparel, local≠national, customer permission, contradictions, multi-cluster reuse, keyword non-attachment, interview re-eval, idempotency, concurrency, legacy reservation invariance.
+Corpus covers approval boundary, pending/revoked/stale, numeric cost, model-inference technical, UV≠apparel, local≠national, customer permission, contradictions, multi-cluster reuse, keyword non-attachment, interview re-eval, idempotency, concurrency, legacy reservation invariance, plus claim-safety corrections:
+
+- explicit freshness for price/turnaround/policy (missing/expired/future/boundary idempotency)
+- technical/safety require authoritative sources (merchant opinion / shop policy insufficient)
+- manufacturer scope match/mismatch
+- merchant observation vs general technical fact
+- customer-question SourceEvidence cannot act as technical answer evidence
 
 Run: `npm run typecheck && npm test && npm run build`

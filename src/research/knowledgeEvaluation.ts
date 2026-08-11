@@ -8,18 +8,23 @@ import type { ReaderTask } from "./readerTask.js";
 import { deriveClaimRequirementsFromCluster } from "./claimRequirements.js";
 import { isActivelyApprovedKnowledge } from "./knowledgeApproval.js";
 import {
+  assessKnowledgeFreshness,
   claimClassAllowsSource,
   claimRelevanceScore,
+  claimRequiresExplicitFreshness,
   factsContradict,
   geographyCompatible,
   hasUsableNumericEvidence,
+  isObservationScopedFact,
   knowledgeClassAligns,
   processSurfacesCompatible,
   resolveKnowledgePrecedence,
-  sourceAuthorityRank
+  sourceAuthorityRank,
+  type FreshnessAssessment
 } from "./knowledgeAuthority.js";
 import {
   KNOWLEDGE_EVALUATION_VERSION,
+  type ClaimClass,
   type ClaimRequirement,
   type ClaimSupportStatus,
   type ClusterEvidenceBudgetM4,
@@ -30,6 +35,8 @@ import {
 import { extractSemanticFeatures } from "./semanticClustering.js";
 import { createPipelineVersionStamp } from "./versioning.js";
 
+export type SourceEvidenceRole = "customer_question" | "factual_answer" | "technical_reference" | "unknown";
+
 export interface ActiveSourceEvidenceStub {
   id: string;
   summary: string;
@@ -39,6 +46,12 @@ export interface ActiveSourceEvidenceStub {
   geographicScope?: GeographicKnowledgeScope;
   processSurface?: ProcessSurfaceScope;
   freshness?: "fresh" | "aging" | "stale" | "unknown";
+  /** Explicit role — customer questions prove demand, not technical answers. */
+  evidenceRole?: SourceEvidenceRole;
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+  freshnessPolicyDays?: number | null;
+  checkedAt?: string | null;
 }
 
 export interface EvaluateClusterKnowledgeArgs {
@@ -64,23 +77,124 @@ function claimGeography(task: ReaderTask): GeographicKnowledgeScope {
   return "unspecified";
 }
 
-function freshnessOf(entry: KnowledgeEntry, now: Date): "fresh" | "aging" | "stale" | "unknown" {
-  if (entry.approvalState === "STALE") return "stale";
-  if (entry.effectiveTo) {
-    const to = Date.parse(entry.effectiveTo);
-    if (!Number.isNaN(to) && to < now.getTime()) return "stale";
+function mapFreshnessToClaim(status: FreshnessAssessment["status"]): ClaimRequirement["freshness"] {
+  if (status === "fresh" || status === "aging" || status === "stale" || status === "unknown") return status;
+  return "unknown";
+}
+
+function assessSourceEvidenceFreshness(
+  src: ActiveSourceEvidenceStub,
+  now: Date,
+  opts: { timeSensitive: boolean }
+): FreshnessAssessment {
+  if (src.freshness === "stale") return { status: "stale", reason: "source evidence marked stale" };
+  const synthetic = {
+    approvalState: src.approvalState === "STALE" ? ("STALE" as const) : ("APPROVED" as const),
+    effectiveFrom: src.effectiveFrom ?? src.checkedAt ?? null,
+    effectiveTo: src.effectiveTo ?? null,
+    freshnessPolicyDays: src.freshnessPolicyDays ?? null,
+    approvedAt: src.checkedAt ?? null
+  };
+  return assessKnowledgeFreshness(synthetic, now, opts);
+}
+
+function inferEvidenceRole(src: ActiveSourceEvidenceStub): SourceEvidenceRole {
+  if (src.evidenceRole) return src.evidenceRole;
+  if (
+    src.sourceType === "active_first_party_customer_evidence" ||
+    /\b(customer question|faq question|asked whether|customers ask)\b/i.test(src.summary)
+  ) {
+    return "customer_question";
   }
-  if (entry.freshnessPolicyDays != null && entry.approvedAt) {
-    const approved = Date.parse(entry.approvedAt);
-    if (!Number.isNaN(approved)) {
-      const ageDays = (now.getTime() - approved) / 86400000;
-      if (ageDays > entry.freshnessPolicyDays) return "stale";
-      if (ageDays > entry.freshnessPolicyDays * 0.7) return "aging";
-      return "fresh";
+  if (
+    src.sourceType === "authoritative_technical_source" ||
+    src.sourceType === "manufacturer_documentation" ||
+    src.sourceType === "public_government_standards"
+  ) {
+    return "technical_reference";
+  }
+  return "unknown";
+}
+
+/**
+ * Validate SourceEvidence before any partial-support attachment.
+ * Customer-question evidence may prove demand, never technical answer evidence.
+ */
+export function sourceEvidenceMayAttachToClaim(
+  src: ActiveSourceEvidenceStub,
+  claimClass: ClaimClass,
+  surface: ProcessSurfaceScope,
+  geo: GeographicKnowledgeScope,
+  now: Date
+): { ok: boolean; reason: string } {
+  if (src.approvalState !== "APPROVED") {
+    return { ok: false, reason: "source evidence is not APPROVED" };
+  }
+  if (src.publicUsageAllowed !== true) {
+    return { ok: false, reason: "source evidence lacks public-usage permission" };
+  }
+
+  const blockedTypes = new Set([
+    "inferred_seed",
+    "model_inference",
+    "template_example",
+    "unsupported_assertion"
+  ]);
+  if (blockedTypes.has(src.sourceType)) {
+    return { ok: false, reason: `sourceType ${src.sourceType} cannot attach to claims` };
+  }
+
+  const role = inferEvidenceRole(src);
+  if (role === "customer_question") {
+    if (
+      claimClass === "technical" ||
+      claimClass === "safety_compliance" ||
+      claimClass === "product_behavior" ||
+      claimClass === "price_cost" ||
+      claimClass === "turnaround" ||
+      claimClass === "merchant_policy" ||
+      claimClass === "time_sensitive" ||
+      claimClass === "comparison_recommendation"
+    ) {
+      return {
+        ok: false,
+        reason: "customer-question evidence proves demand, not factual/technical answer evidence"
+      };
     }
   }
-  if (entry.approvedAt) return "fresh";
-  return "unknown";
+
+  if (claimClass === "technical" || claimClass === "safety_compliance") {
+    if (
+      src.sourceType !== "authoritative_technical_source" &&
+      src.sourceType !== "manufacturer_documentation" &&
+      src.sourceType !== "public_government_standards"
+    ) {
+      return {
+        ok: false,
+        reason: "technical/safety partial support requires authoritative SourceEvidence types"
+      };
+    }
+  }
+
+  if (claimRequiresExplicitFreshness(claimClass)) {
+    const fresh = assessSourceEvidenceFreshness(src, now, { timeSensitive: true });
+    if (fresh.status === "stale") return { ok: false, reason: fresh.reason };
+    if (fresh.status === "unknown" || fresh.status === "not_yet_effective") {
+      return { ok: false, reason: fresh.reason };
+    }
+  } else if (src.freshness === "stale") {
+    return { ok: false, reason: "source evidence is stale" };
+  }
+
+  if (src.processSurface && !processSurfacesCompatible(src.processSurface, surface)) {
+    return { ok: false, reason: "source evidence process surface does not match claim" };
+  }
+  if (src.geographicScope) {
+    const geoOk = geographyCompatible(src.geographicScope, geo);
+    if (!geoOk.ok) return { ok: false, reason: geoOk.reason || "geographic scope mismatch" };
+  }
+
+  return { ok: true, reason: "eligible" };
 }
 
 function scopeMatchScore(
@@ -109,6 +223,7 @@ function evaluateOneClaim(
 ): ClaimRequirement {
   const surface = claimSurface(args.task);
   const geo = claimGeography(args.task);
+  const timeSensitive = claimRequiresExplicitFreshness(requirement.claimClass);
   const taskContext = [
     args.task.actualQuestion,
     args.task.decisionOrAction,
@@ -117,7 +232,14 @@ function evaluateOneClaim(
     args.task.desiredOutcome,
     ...(args.task.constraints || [])
   ].join(" ");
-  const candidates: Array<{ entry: KnowledgeEntry; relevance: number; scopeScore: number }> = [];
+  const candidates: Array<{
+    entry: KnowledgeEntry;
+    relevance: number;
+    scopeScore: number;
+    observationOnly: boolean;
+    authorityOk: boolean;
+    authorityReason?: string;
+  }> = [];
 
   for (const entry of args.knowledgeEntries) {
     let relevance = claimRelevanceScore(requirement.normalizedClaim, entry, taskContext);
@@ -125,15 +247,21 @@ function evaluateOneClaim(
     if (knowledgeClassAligns(requirement.claimClass, entry.knowledgeClass)) {
       relevance = Math.min(1, relevance + 0.15);
     } else if (relevance < 0.4) {
-      // Non-aligned classes need stronger textual overlap to avoid keyword stretch.
       continue;
     }
     const scopeScore = scopeMatchScore(entry, surface, geo);
     if (scopeScore < 0) continue;
-    candidates.push({ entry, relevance, scopeScore });
+    const allow = claimClassAllowsSource(requirement.claimClass, entry);
+    candidates.push({
+      entry,
+      relevance,
+      scopeScore,
+      observationOnly: allow.observationOnly === true,
+      authorityOk: allow.ok,
+      authorityReason: allow.reason
+    });
   }
 
-  // Sort by relevance then authority for stable evaluation
   candidates.sort((a, b) => {
     if (b.relevance !== a.relevance) return b.relevance - a.relevance;
     return sourceAuthorityRank(b.entry.sourceType) - sourceAuthorityRank(a.entry.sourceType);
@@ -152,20 +280,29 @@ function evaluateOneClaim(
   let merchantInputRequired = requirement.merchantInputRequired;
   let explanation = "No matching approved knowledge or active evidence.";
 
-  const activeApproved = candidates.filter(c => {
-    if (!isActivelyApprovedKnowledge(c.entry, c.entry.contentHash, args.now)) return false;
-    const allow = claimClassAllowsSource(requirement.claimClass, c.entry);
-    return allow.ok;
-  });
-
-  // Strict numeric / permission rules
-  if (requirement.claimClass === "price_cost" || requirement.claimClass === "time_sensitive") {
-    // price and time-sensitive need freshness
+  const freshnessByEntry = new Map<string, FreshnessAssessment>();
+  for (const c of candidates) {
+    freshnessByEntry.set(
+      c.entry.id,
+      assessKnowledgeFreshness(c.entry, args.now, { timeSensitive })
+    );
   }
 
+  const activeApproved = candidates.filter(c => {
+    if (!c.authorityOk) return false;
+    if (!isActivelyApprovedKnowledge(c.entry, c.entry.contentHash, args.now)) return false;
+    const fresh = freshnessByEntry.get(c.entry.id)!;
+    if (timeSensitive) {
+      if (fresh.status === "unknown" || fresh.status === "not_yet_effective" || fresh.status === "stale") {
+        return false;
+      }
+    } else if (fresh.status === "stale" || fresh.status === "not_yet_effective") {
+      return false;
+    }
+    return true;
+  });
+
   // Detect contradictions among active approved candidates with high relevance.
-  // Precedence is recorded for audit, but material conflicts always block support —
-  // never silently choose the source that makes an article easier.
   const material = activeApproved.filter(c => c.relevance >= 0.35);
   let hasMaterialConflict = false;
   for (let i = 0; i < material.length; i++) {
@@ -207,26 +344,20 @@ function evaluateOneClaim(
     };
   }
 
-  const chosen = material[0];
+  // Prefer full (non-observation-only) support when available.
+  const chosen =
+    material.find(c => !c.observationOnly) ||
+    material[0];
 
   if (chosen) {
     const entry = chosen.entry;
-    const fresh = freshnessOf(entry, args.now);
-    freshness = fresh;
+    const fresh = freshnessByEntry.get(entry.id)!;
+    freshness = mapFreshnessToClaim(fresh.status);
     evidenceFound.push(entry.exactApprovedFact);
     supportingKnowledgeIds.push(entry.id);
     supportingRevisionIds.push(entry.revisionId);
 
-    if (fresh === "stale") {
-      supportStatus = "stale";
-      explanation =
-        requirement.claimClass === "price_cost" ||
-        requirement.claimClass === "turnaround" ||
-        requirement.claimClass === "merchant_policy"
-          ? "Pricing/policy/turnaround cannot be supported by stale knowledge."
-          : "Matching knowledge is stale relative to freshness policy or effective window.";
-      safeToState = false;
-    } else if (requirement.claimClass === "price_cost" && !hasUsableNumericEvidence(entry.exactApprovedFact)) {
+    if (requirement.claimClass === "price_cost" && !hasUsableNumericEvidence(entry.exactApprovedFact)) {
       supportStatus = "unsupported";
       explanation = "Cost/price claim lacks usable numeric evidence; remains UNKNOWN.";
       merchantInputRequired = true;
@@ -234,6 +365,17 @@ function evaluateOneClaim(
       supportStatus = "prohibited";
       explanation = "Customer-result claim lacks public-usage permission.";
       safeToState = false;
+    } else if (
+      chosen.observationOnly ||
+      (requirement.claimClass === "product_behavior" && entry.sourceType === "approved_merchant_firsthand")
+    ) {
+      const scoped = isObservationScopedFact(entry.exactApprovedFact);
+      supportStatus = "partially_supported";
+      qualificationRequired = true;
+      safeToState = false;
+      explanation = scoped
+        ? `Merchant observation ${entry.id} may qualify product behavior only as scoped shop experience — not a general technical fact.`
+        : `Merchant firsthand ${entry.id} cannot be promoted to a general technical/product-behavior fact without observation scoping and authoritative support.`;
     } else if (requirement.claimClass === "comparison_recommendation") {
       const hasCriteria = /\b(criteria|tradeoff|versus|vs|because|when|if)\b/i.test(entry.exactApprovedFact);
       if (!hasCriteria && chosen.relevance < 0.55) {
@@ -256,10 +398,19 @@ function evaluateOneClaim(
       explanation = `Supported by approved knowledge ${entry.id} revision ${entry.revisionId} (${entry.sourceType}).`;
     }
   } else {
-    // Check why candidates failed
     const pending = candidates.filter(c => c.entry.approvalState === "PENDING_APPROVAL");
-    const revoked = candidates.filter(c => c.entry.approvalState === "REVOKED" || c.entry.approvalState === "INVALIDATED");
-    const stale = candidates.filter(c => c.entry.approvalState === "STALE" || freshnessOf(c.entry, args.now) === "stale");
+    const revoked = candidates.filter(
+      c => c.entry.approvalState === "REVOKED" || c.entry.approvalState === "INVALIDATED"
+    );
+    const stale = candidates.filter(c => {
+      const f = freshnessByEntry.get(c.entry.id);
+      return c.entry.approvalState === "STALE" || f?.status === "stale";
+    });
+    const missingFreshness = candidates.filter(c => {
+      const f = freshnessByEntry.get(c.entry.id);
+      return timeSensitive && f?.status === "unknown";
+    });
+    const notYet = candidates.filter(c => freshnessByEntry.get(c.entry.id)?.status === "not_yet_effective");
     const inferenceOnly = candidates.filter(
       c =>
         c.entry.sourceType === "model_inference" ||
@@ -273,11 +424,42 @@ function evaluateOneClaim(
         (c.entry.sourceType === "active_first_party_customer_evidence" ||
           c.entry.sourceType === "approved_merchant_firsthand")
     );
+    const merchantBlockedTechnical = candidates.filter(
+      c =>
+        !c.authorityOk &&
+        (requirement.claimClass === "technical" || requirement.claimClass === "safety_compliance") &&
+        (c.entry.sourceType === "approved_merchant_firsthand" ||
+          c.entry.sourceType === "approved_business_fact_or_policy")
+    );
 
     if (noPermissionCustomer.length) {
       supportStatus = "prohibited";
-      explanation = "Customer-result evidence exists but public-usage permission is missing; claim remains prohibited.";
+      explanation =
+        "Customer-result evidence exists but public-usage permission is missing; claim remains prohibited.";
       safeToState = false;
+    } else if (missingFreshness.length) {
+      supportStatus = "unsupported";
+      freshness = "unknown";
+      explanation =
+        "Time-sensitive claim requires explicit effective/checked date plus freshness window or expiration; remains UNKNOWN.";
+      merchantInputRequired = true;
+    } else if (notYet.length && !activeApproved.length) {
+      supportStatus = "unsupported";
+      freshness = "unknown";
+      explanation = "Matching knowledge is not yet effective (future effectiveFrom).";
+    } else if (stale.length && !activeApproved.length) {
+      supportStatus = "stale";
+      freshness = "stale";
+      explanation =
+        timeSensitive
+          ? "Time-sensitive knowledge is stale (expired effectiveTo or exceeded freshness window)."
+          : "Matching knowledge is stale and cannot support current claims.";
+    } else if (merchantBlockedTechnical.length && !activeApproved.length) {
+      supportStatus = "unsupported";
+      explanation =
+        requirement.claimClass === "safety_compliance"
+          ? "Approved shop policy/merchant opinion cannot establish a safety requirement; authoritative or standards support required."
+          : "Approved merchant opinion cannot fully support a technical specification; authoritative/manufacturer/standards support required.";
     } else if (
       requirement.claimClass === "merchant_experience" ||
       requirement.merchantInputRequired
@@ -288,9 +470,6 @@ function evaluateOneClaim(
     } else if (inferenceOnly.length && !activeApproved.length) {
       supportStatus = "unsupported";
       explanation = "Only model inference/seed/template candidates found; they cannot satisfy claims.";
-    } else if (stale.length && !activeApproved.length) {
-      supportStatus = "stale";
-      explanation = "Matching knowledge is stale and cannot support current claims.";
     } else if (pending.length) {
       supportStatus = "requires_merchant_input";
       merchantInputRequired = true;
@@ -304,29 +483,50 @@ function evaluateOneClaim(
       explanation = "Cost claim without numeric approved evidence remains UNKNOWN.";
     }
 
-    // Active source evidence may partially support educational claims
-    const approvedSources = args.sourceEvidence.filter(
-      s => s.approvalState === "APPROVED" && s.publicUsageAllowed
-    );
-    for (const src of approvedSources) {
-      const rel = claimRelevanceScore(requirement.normalizedClaim, {
-        normalizedClaim: src.summary,
-        exactApprovedFact: src.summary,
-        knowledgeClass: "general_authoritative_education"
-      });
-      if (rel >= 0.35) {
-        supportingSourceEvidenceIds.push(src.id);
-        evidenceFound.push(`source_evidence:${src.id}`);
-      }
+    // Hardened SourceEvidence attachment — validate type/approval/permission/freshness/scope/claim suitability.
+    for (const src of args.sourceEvidence) {
+      const attach = sourceEvidenceMayAttachToClaim(src, requirement.claimClass, surface, geo, args.now);
+      if (!attach.ok) continue;
+      const rel = claimRelevanceScore(
+        requirement.normalizedClaim,
+        {
+          normalizedClaim: src.summary,
+          exactApprovedFact: src.summary,
+          knowledgeClass: "general_authoritative_education"
+        },
+        taskContext
+      );
+      if (rel < 0.35) continue;
+      supportingSourceEvidenceIds.push(src.id);
+      evidenceFound.push(`source_evidence:${src.id}`);
     }
-    if (
-      supportStatus === "unsupported" &&
-      supportingSourceEvidenceIds.length &&
-      (requirement.claimClass === "general_educational" || requirement.claimClass === "technical")
-    ) {
-      supportStatus = "partially_supported";
-      qualificationRequired = true;
-      explanation = "Active first-party/source evidence present but approved knowledge map incomplete.";
+
+    if (supportStatus === "unsupported" && supportingSourceEvidenceIds.length) {
+      const roles = args.sourceEvidence
+        .filter(s => supportingSourceEvidenceIds.includes(s.id))
+        .map(inferEvidenceRole);
+      if (roles.every(r => r === "customer_question")) {
+        // Demand signal only — do not upgrade support for answer claims.
+        explanation =
+          "Customer-question SourceEvidence shows demand only; it is not factual answer or technical evidence.";
+      } else if (
+        requirement.claimClass === "general_educational" ||
+        (requirement.claimClass === "technical" &&
+          args.sourceEvidence.some(
+            s =>
+              supportingSourceEvidenceIds.includes(s.id) &&
+              (s.sourceType === "authoritative_technical_source" ||
+                s.sourceType === "manufacturer_documentation" ||
+                s.sourceType === "public_government_standards")
+          ))
+      ) {
+        supportStatus = "partially_supported";
+        qualificationRequired = true;
+        explanation =
+          requirement.claimClass === "technical"
+            ? "Authoritative SourceEvidence partially supports the technical claim; approved knowledge map still incomplete."
+            : "Eligible SourceEvidence partially supports educational framing; approved knowledge map incomplete.";
+      }
     }
   }
 
@@ -347,7 +547,9 @@ function evaluateOneClaim(
   };
 }
 
-export function buildEvidenceBudgetMaterialHash(budget: Omit<ClusterEvidenceBudgetM4, "materialHash" | "pipelineVersions">): string {
+export function buildEvidenceBudgetMaterialHash(
+  budget: Omit<ClusterEvidenceBudgetM4, "materialHash" | "pipelineVersions">
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -371,7 +573,8 @@ export function buildEvidenceBudgetMaterialHash(budget: Omit<ClusterEvidenceBudg
           supportingKnowledgeIds: c.supportingKnowledgeIds,
           supportingRevisionIds: c.supportingRevisionIds,
           contradictions: c.contradictions,
-          safeToState: c.safeToState
+          safeToState: c.safeToState,
+          freshness: c.freshness
         }))
       })
     )
