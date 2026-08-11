@@ -805,13 +805,77 @@ export async function migrate(db: Db): Promise<void> {
       "CREATE INDEX IF NOT EXISTS knowledge_evaluation_runs_material_idx ON knowledge_evaluation_runs(material_hash)"
     );
 
+    // M5: natural titles + intent-native briefs (additive; no AUTO decision mutation)
+    await client.query(`CREATE TABLE IF NOT EXISTS natural_title_proposals (
+      id text PRIMARY KEY,
+      cluster_id text,
+      canonical_reader_task_id text NOT NULL,
+      title text NOT NULL,
+      pattern_family text NOT NULL,
+      reader_question text NOT NULL,
+      rationale text NOT NULL DEFAULT '',
+      evidence_gated boolean NOT NULL DEFAULT false,
+      blocked_claim_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+      diversity_ok boolean NOT NULL DEFAULT true,
+      diversity_share double precision NOT NULL DEFAULT 0,
+      banned_template boolean NOT NULL DEFAULT false,
+      title_version text NOT NULL,
+      material_hash text NOT NULL,
+      payload jsonb NOT NULL,
+      pipeline_versions jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS natural_title_proposals_cluster_idx ON natural_title_proposals(cluster_id)"
+    );
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS natural_title_proposals_family_idx ON natural_title_proposals(pattern_family)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS intent_native_briefs (
+      id text PRIMARY KEY,
+      cluster_id text,
+      canonical_reader_task_id text NOT NULL,
+      title_proposal_id text NOT NULL,
+      proposed_title text NOT NULL,
+      reader_question text NOT NULL,
+      decision_hint text NOT NULL
+        CHECK (decision_hint IN ('DRAFT_CANDIDATE','NEEDS_EVIDENCE','NEEDS_MERCHANT_INPUT','BLOCKED')),
+      brief_version text NOT NULL,
+      material_hash text NOT NULL,
+      payload jsonb NOT NULL,
+      pipeline_versions jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS intent_native_briefs_cluster_idx ON intent_native_briefs(cluster_id)"
+    );
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS intent_native_briefs_hint_idx ON intent_native_briefs(decision_hint)"
+    );
+
+    await client.query(`CREATE TABLE IF NOT EXISTS title_generation_runs (
+      id bigserial PRIMARY KEY,
+      title_version text NOT NULL,
+      brief_version text NOT NULL,
+      inserted_count integer NOT NULL DEFAULT 0,
+      unchanged_count integer NOT NULL DEFAULT 0,
+      detail jsonb NOT NULL DEFAULT '{}'::jsonb,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await client.query(
+      "CREATE INDEX IF NOT EXISTS title_generation_runs_created_idx ON title_generation_runs(created_at DESC)"
+    );
+
     await client.query(
       `INSERT INTO schema_migrations(id) VALUES
         ('001_initial'), ('002_articles_audit'), ('003_sessions'), ('004_topic_research'),
         ('005_research_cycle_runs'), ('006_research_cycle_atomic_claim'),
         ('007_rollout_draft_counted_unique'), ('008_source_evidence_reader_tasks'),
         ('009_evidence_approval_authority'), ('010_opportunity_clusters'),
-        ('011_knowledge_registry')
+        ('011_knowledge_registry'), ('012_natural_title_briefs')
        ON CONFLICT DO NOTHING`
     );
 

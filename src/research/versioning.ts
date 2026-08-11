@@ -7,9 +7,9 @@ export const PIPELINE_VERSIONS = {
   normalization: "normalization.v1.source-evidence-to-reader-task",
   clustering: "clustering.v1.semantic-reader-task",
   knowledgeRegistry: "knowledge.v1.approved-claim-budget",
-  titleGeneration: "title.v0.template-and-refinement",
+  titleGeneration: "title.v1.reader-task-natural",
   decisionPolicy: "decision.v1.auto-only-generation",
-  briefSchema: "brief.v1.opportunity-copy",
+  briefSchema: "brief.v2.intent-native-reader-task",
   generationPrompt: "generation.v1.writer-json",
   verificationRubric: "verification.v1.quality-gates",
   readerTaskSchema: "readerTask.v1"

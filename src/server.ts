@@ -93,7 +93,9 @@ import {
   getSourceIngestionHealth,
   getClusterHealth,
   getKnowledgeRegistryHealth,
+  getNaturalTitleHealth,
   evaluateAndPersistAllActiveClusters,
+  generateTitlesForActiveClusters,
   runSourceEvidenceIngestion,
   runSemanticReaderTaskClustering,
   updateBrief
@@ -344,12 +346,13 @@ app.get("/", async (req: AuthedRequest, res) => {
 // ---- Topic research ----
 app.get("/research", async (req: AuthedRequest, res) => {
   const settings = await getSettings(db);
-  const [cycle, opportunities, sourceHealth, clusterHealth, knowledgeHealth] = await Promise.all([
+  const [cycle, opportunities, sourceHealth, clusterHealth, knowledgeHealth, titleHealth] = await Promise.all([
     latestCycleMeta(db),
     listOpportunities(db, 40),
     getSourceIngestionHealth(db).catch(() => null),
     getClusterHealth(db).catch(() => null),
-    getKnowledgeRegistryHealth(db).catch(() => null)
+    getKnowledgeRegistryHealth(db).catch(() => null),
+    getNaturalTitleHealth(db).catch(() => null)
   ]);
   res.send(layout({
     active: "/research",
@@ -366,7 +369,8 @@ app.get("/research", async (req: AuthedRequest, res) => {
       pillars: CONTENT_PILLARS,
       sourceHealth,
       clusterHealth,
-      knowledgeHealth
+      knowledgeHealth,
+      titleHealth
     })
   }));
 });
@@ -405,10 +409,30 @@ app.post("/research/evaluate-knowledge", async (req: AuthedRequest, res) => {
       `Knowledge evaluation complete: ${result.budgets.length} cluster budget(s), ` +
       `${result.packets.length} interview packet(s), ` +
       `${result.persist.inserted} inserted / ${result.persist.updated} updated / ${result.persist.unchanged} unchanged. ` +
-      `No titles, briefs, or AUTO_ELIGIBLE decisions created.`;
+      `No AUTO_ELIGIBLE decisions created.`;
     res.redirect("/research?notice=" + encodeURIComponent(notice));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Knowledge evaluation failed.";
+    res.redirect("/research?error=" + encodeURIComponent(message));
+  }
+});
+
+app.post("/research/generate-natural-titles", async (req: AuthedRequest, res) => {
+  if (!requireCsrf(req, res)) return;
+  const settings = await getSettings(db);
+  if (!settings.research.enabled) {
+    return res.redirect("/research?error=" + encodeURIComponent("Research is disabled in settings."));
+  }
+  try {
+    const result = await generateTitlesForActiveClusters(db, {
+      actor: `admin:${req.auth?.user || "ops"}`
+    });
+    const notice =
+      `Natural title generation complete: ${result.generated} generated / ${result.unchanged} unchanged, ` +
+      `${result.diversityViolations} diversity flag(s). No AUTO_ELIGIBLE decisions created.`;
+    res.redirect("/research?notice=" + encodeURIComponent(notice));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Natural title generation failed.";
     res.redirect("/research?error=" + encodeURIComponent(message));
   }
 });

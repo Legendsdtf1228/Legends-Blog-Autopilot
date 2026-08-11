@@ -34,6 +34,7 @@ import { evaluatePreGeneration } from "./editorialControls.js";
 import { isIncoherentSearchIntent } from "./semanticIntent.js";
 import { assessTopicSpecificity, suggestRefinement } from "./specificity.js";
 import { buildIntentOutline } from "./templateDetection.js";
+import { assertNoBannedProductionTitle, buildNaturalTitleFromKeyword } from "./naturalTitle.js";
 import type {
   ArticleFormatId,
   AudienceId,
@@ -115,22 +116,14 @@ function fitsLegends(pillar: string, keyword: string): boolean {
 
 function buildTitle(cluster: { primaryKeyword: string; format: string; intent: string; subcategory: string }): string {
   const refinement = suggestRefinement(cluster.primaryKeyword);
-  if (refinement) return refinement.title;
-  const k = cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase());
-  if (cluster.format === "comparison" || cluster.intent === "commercial") {
-    return `${k}: Which Option Fits Your Apparel Project?`;
-  }
-  if (cluster.format === "first_person_story") {
-    return `${k}: Honest Lessons From Building a Print Business`;
-  }
-  if (cluster.format === "checklist") {
-    // Avoid pairing checklist titles with incoherent / story keywords.
-    if (/\bstories?\b/i.test(cluster.primaryKeyword) || isIncoherentSearchIntent(cluster.primaryKeyword)) {
-      return `${k}: Practical Questions Local Buyers Should Ask`;
-    }
-    return `${k}: A Decision Checklist for Apparel Buyers`;
-  }
-  return `${k}: What ${cluster.subcategory.replace(/\b\w/g, c => c.toUpperCase())} Buyers Should Know`;
+  const title = buildNaturalTitleFromKeyword({
+    primaryKeyword: cluster.primaryKeyword,
+    format: cluster.format,
+    intent: cluster.intent,
+    refinementTitle: refinement?.title || null
+  });
+  assertNoBannedProductionTitle(title);
+  return title;
 }
 
 function audienceForRefinement(refinementAudience: string, pillarAudiences: AudienceId[]): AudienceId {

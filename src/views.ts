@@ -585,6 +585,19 @@ export function researchPage(args: {
     }>;
     lastEvaluationRunAt: string | null;
   } | null;
+  titleHealth?: {
+    titleVersion: string;
+    briefVersion: string;
+    titleProposalCount: number;
+    intentNativeBriefCount: number;
+    bannedTemplateCount: number;
+    diversityMaxShare: number;
+    diversityViolationCount: number;
+    decisionHintCounts: Array<{ hint: string; count: number }>;
+    patternFamilyCounts: Array<{ family: string; count: number }>;
+    sampleTitles: Array<{ title: string; patternFamily: string; diversityOk: boolean }>;
+    lastRunAt: string | null;
+  } | null;
 }) {
   const missing = args.cycle?.missingProviders?.length
     ? `<div class="notice">${args.cycle.missingProviders.map(m => `<div><strong>${esc(m.provider)}</strong>: ${esc(m.reason)}</div>`).join("")}</div>`
@@ -706,6 +719,46 @@ export function researchPage(args: {
       </section>`
     : "";
 
+  const titleHealth = args.titleHealth;
+  const titleHealthCard = titleHealth
+    ? `<section class="card">
+        <h3>Natural titles &amp; intent-native briefs (M5)</h3>
+        <p class="muted">Titles and briefs from canonical ReaderTasks. Banned template suffixes removed from production paths. Diversity cap ${esc(String(Math.round(titleHealth.diversityMaxShare * 100)))}%. Does not assign AUTO_ELIGIBLE. Versions: ${esc(titleHealth.titleVersion)} · ${esc(titleHealth.briefVersion)}</p>
+        <div class="row" style="gap:1.5rem;flex-wrap:wrap">
+          <div><strong>${esc(String(titleHealth.titleProposalCount))}</strong> title proposals</div>
+          <div><strong>${esc(String(titleHealth.intentNativeBriefCount))}</strong> intent-native briefs</div>
+          <div><strong>${esc(String(titleHealth.bannedTemplateCount))}</strong> banned-template flags</div>
+          <div><strong>${esc(String(titleHealth.diversityViolationCount))}</strong> diversity flags</div>
+        </div>
+        ${titleHealth.lastRunAt
+          ? `<p class="muted">Last run ${esc(new Date(titleHealth.lastRunAt).toLocaleString("en-US", { timeZone: args.settings.timezone }))}</p>`
+          : `<p class="muted">No title generation runs yet.</p>`}
+        <h4>Decision hints (not AUTO)</h4>
+        <ul>${titleHealth.decisionHintCounts.length
+          ? titleHealth.decisionHintCounts.map(h =>
+              `<li>${esc(h.hint)}: ${esc(String(h.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Pattern families</h4>
+        <ul>${titleHealth.patternFamilyCounts.length
+          ? titleHealth.patternFamilyCounts.map(f =>
+              `<li>${esc(f.family)}: ${esc(String(f.count))}</li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <h4>Sample titles</h4>
+        <ul>${titleHealth.sampleTitles.length
+          ? titleHealth.sampleTitles.map(t =>
+              `<li><strong>${esc(t.title)}</strong>
+                <div class="muted">${esc(t.patternFamily)}${t.diversityOk ? "" : " · diversity flag"}</div></li>`
+            ).join("")
+          : "<li class=\"muted\">None</li>"}</ul>
+        <form method="post" action="/research/generate-natural-titles" class="actions" style="margin-top:0.75rem">
+          <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
+          <button type="submit" ${args.settings.research.enabled ? "" : "disabled"}>Generate natural titles &amp; briefs</button>
+        </form>
+      </section>`
+    : "";
+
   const failureSummary = (() => {
     const counts = new Map<string, number>();
     for (const o of args.opportunities) {
@@ -767,6 +820,7 @@ export function researchPage(args: {
   ${sourceHealthCard}
   ${clusterHealthCard}
   ${knowledgeHealthCard}
+  ${titleHealthCard}
   ${failureSummary}
   <section class="card">
     <h3>Approved content pillars</h3>

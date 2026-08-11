@@ -8,6 +8,7 @@ import { selectProductsForKeyword } from "./productSelection.js";
 import { isIncoherentSearchIntent } from "./semanticIntent.js";
 import { assessTopicSpecificity, suggestRefinement } from "./specificity.js";
 import { buildIntentOutline } from "./templateDetection.js";
+import { buildNaturalTitleFromKeyword, assertNoBannedProductionTitle } from "./naturalTitle.js";
 import { buildSeoDeliverables } from "./seo.js";
 import type {
   ArticleBrief,
@@ -269,9 +270,13 @@ export function evaluateCustomTopic(topic: string, args: {
   let readerQuestion = shouldRefine && refinement?.readerQuestion
     ? refinement.readerQuestion
     : `What should readers know about ${cluster.primaryKeyword}?`;
-  let proposedTitle = shouldRefine && refinement?.title
-    ? refinement.title
-    : `${cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase())}: What Buyers Should Know`;
+  let proposedTitle = buildNaturalTitleFromKeyword({
+    primaryKeyword: cluster.primaryKeyword,
+    format: cluster.format,
+    intent: cluster.intent,
+    refinementTitle: shouldRefine && refinement?.title ? refinement.title : null
+  });
+  assertNoBannedProductionTitle(proposedTitle);
   let audienceLabel = (shouldRefine && refinement?.audience) || AUDIENCE_LABELS[cluster.audience];
   const promiseHint = classifyContentPromise({
     title: proposedTitle,
