@@ -6,7 +6,11 @@ import { findClosestOverlap, isRejectedByOverlap, type ExistingArticleRef } from
 import { AUDIENCE_LABELS, DEFAULT_RESEARCH_SETTINGS, pillarById } from "./pillars.js";
 import { selectProductsForKeyword } from "./productSelection.js";
 import { isIncoherentSearchIntent } from "./semanticIntent.js";
-import { buildIntentReaderQuestion, buildNaturalTitle } from "./naturalLanguage.js";
+import {
+  buildIntentReaderQuestion,
+  buildNaturalTitle,
+  READER_QUESTION_PROVENANCE
+} from "./naturalLanguage.js";
 import { assessTopicSpecificity, suggestRefinement } from "./specificity.js";
 import { buildIntentOutline } from "./templateDetection.js";
 import { buildSeoDeliverables } from "./seo.js";
@@ -139,6 +143,7 @@ export function buildArticleBrief(
     searchIntent: opportunity.cluster.intent,
     targetAudienceLabel: AUDIENCE_LABELS[opportunity.cluster.audience],
     readerQuestion: opportunity.readerQuestion,
+    readerQuestionProvenance: opportunity.readerQuestionProvenance,
     geographicTarget: settings.region,
     demandEvidence: opportunity.dataCollectedLabel,
     demandClass: opportunity.demandClass,
@@ -280,7 +285,10 @@ export function evaluateCustomTopic(topic: string, args: {
     ? refinement.title
     : buildNaturalTitle({
         primaryKeyword: cluster.primaryKeyword,
-        readerQuestion,
+        question: {
+          text: readerQuestion,
+          provenance: READER_QUESTION_PROVENANCE.EDITORIAL_FALLBACK
+        },
         format: cluster.format,
         intent: cluster.intent,
         subcategory: cluster.subcategory,
@@ -441,6 +449,7 @@ export function evaluateCustomTopic(topic: string, args: {
     proposedHandle: slug(proposedTitle),
     proposedOutline: outline,
     readerQuestion,
+    readerQuestionProvenance: READER_QUESTION_PROVENANCE.EDITORIAL_FALLBACK,
     topicSpecificity: Math.min(specificity.score, preGen.depth.score),
     uniqueness: 1 - (overlap?.score ?? 0),
     demandClass: "editorial_business_opportunity",

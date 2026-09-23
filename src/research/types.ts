@@ -209,6 +209,8 @@ export interface ResearchOpportunity {
   proposedHandle: string;
   proposedOutline: string[];
   readerQuestion: string;
+  /** Explicitly distinguishes observed/approved language from editorial framing. */
+  readerQuestionProvenance?: import("./naturalLanguage.js").ReaderQuestionProvenance;
   topicSpecificity: number;
   uniqueness: number;
   demandClass: DemandEvidenceClass;
@@ -265,6 +267,8 @@ export interface ArticleBrief {
   searchIntent: SearchIntent;
   targetAudienceLabel: string;
   readerQuestion: string;
+  /** Explicitly distinguishes observed/approved language from editorial framing. */
+  readerQuestionProvenance?: import("./naturalLanguage.js").ReaderQuestionProvenance;
   geographicTarget: string;
   demandEvidence: string;
   demandClass: DemandEvidenceClass;

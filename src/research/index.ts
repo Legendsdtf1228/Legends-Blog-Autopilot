@@ -23,6 +23,8 @@ export * from "./sourceEvidence.js";
 export * from "./evidenceApproval.js";
 export * from "./merchantEvidenceApproval.js";
 export * from "./normalizeReaderTask.js";
+export * from "./naturalLanguage.js";
+export * from "./readerTaskFraming.js";
 export * from "./sourceEvidenceStore.js";
 export * from "./ingestion.js";
 export * from "./opportunityCluster.js";

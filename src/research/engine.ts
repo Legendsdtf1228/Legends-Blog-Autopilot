@@ -31,7 +31,11 @@ import {
 } from "./rotation.js";
 import { demandFromSignals, formatCollectedLabel, growthFromSignals, scoreOpportunity } from "./scoring.js";
 import { evaluatePreGeneration } from "./editorialControls.js";
-import { buildIntentReaderQuestion, buildNaturalTitle } from "./naturalLanguage.js";
+import {
+  buildIntentReaderQuestion,
+  buildNaturalTitle,
+  READER_QUESTION_PROVENANCE
+} from "./naturalLanguage.js";
 import { isIncoherentSearchIntent } from "./semanticIntent.js";
 import { assessTopicSpecificity, suggestRefinement } from "./specificity.js";
 import { buildIntentOutline } from "./templateDetection.js";
@@ -302,7 +306,10 @@ export async function runResearchCycle(args: {
       });
     let proposedTitle = refinementMeta?.title || buildNaturalTitle({
       primaryKeyword: cluster.primaryKeyword,
-      readerQuestion,
+      question: {
+        text: readerQuestion,
+        provenance: READER_QUESTION_PROVENANCE.EDITORIAL_FALLBACK
+      },
       format: cluster.format,
       intent: cluster.intent,
       subcategory: cluster.subcategory,
@@ -481,6 +488,7 @@ export async function runResearchCycle(args: {
       proposedHandle: slugify(proposedTitle),
       proposedOutline,
       readerQuestion,
+      readerQuestionProvenance: READER_QUESTION_PROVENANCE.EDITORIAL_FALLBACK,
       topicSpecificity: Math.min(specificity.score, preGen.depth.score),
       uniqueness,
       demandClass,
