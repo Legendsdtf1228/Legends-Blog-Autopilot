@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: owner-console
+    description: Read-only owner console views and fail-closed development controls
 paths:
   /healthz:
     get:
@@ -24,7 +26,203 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /dashboard:
+    get:
+      operationId: getDashboard
+      tags: [owner-console]
+      summary: Get owner dashboard summary
+      responses:
+        "200":
+          description: Owner dashboard state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+  /pipeline:
+    get:
+      operationId: listPipelineItems
+      tags: [owner-console]
+      summary: List content pipeline items
+      parameters:
+        - $ref: "#/components/parameters/StatusFilter"
+        - $ref: "#/components/parameters/CategoryFilter"
+        - $ref: "#/components/parameters/AudienceFilter"
+      responses:
+        "200":
+          description: Pipeline items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PipelineItem"
+  /pipeline/{id}:
+    get:
+      operationId: getPipelineItem
+      tags: [owner-console]
+      summary: Get a content pipeline detail
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Pipeline item detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PipelineDetail"
+        "404":
+          description: Pipeline item not found
+  /research/clusters:
+    get:
+      operationId: listResearchClusters
+      tags: [owner-console]
+      summary: List active and review research clusters
+      responses:
+        "200":
+          description: ReaderTask clusters
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ResearchCluster"
+  /knowledge:
+    get:
+      operationId: listKnowledgeEntries
+      tags: [owner-console]
+      summary: List knowledge entries
+      responses:
+        "200":
+          description: Knowledge center entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/KnowledgeEntry"
+  /questions:
+    get:
+      operationId: listMerchantQuestions
+      tags: [owner-console]
+      summary: List unanswered merchant questions
+      responses:
+        "200":
+          description: Questions requiring owner input
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MerchantQuestion"
+  /questions/{id}/answer:
+    post:
+      operationId: answerMerchantQuestion
+      tags: [owner-console]
+      summary: Save a merchant answer as pending
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantAnswerInput"
+      responses:
+        "200":
+          description: Pending answer saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MerchantQuestion"
+        "400":
+          description: Invalid answer
+        "404":
+          description: Question not found
+  /calendar:
+    get:
+      operationId: getPublishingCalendar
+      tags: [owner-console]
+      summary: Get development publishing calendar
+      responses:
+        "200":
+          description: Calendar entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CalendarEntry"
+  /settings:
+    get:
+      operationId: getOwnerSettings
+      tags: [owner-console]
+      summary: Get owner console settings
+      responses:
+        "200":
+          description: Current safe settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnerSettings"
+    patch:
+      operationId: updateOwnerSettings
+      tags: [owner-console]
+      summary: Update safe owner console settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OwnerSettingsUpdate"
+      responses:
+        "200":
+          description: Updated safe settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnerSettings"
+        "400":
+          description: Locked operating mode or invalid setting
+  /activity:
+    get:
+      operationId: listActivity
+      tags: [owner-console]
+      summary: List recent activity and errors
+      responses:
+        "200":
+          description: Activity timeline
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActivityEvent"
 components:
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    StatusFilter:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+    CategoryFilter:
+      name: category
+      in: query
+      required: false
+      schema:
+        type: string
+    AudienceFilter:
+      name: audience
+      in: query
+      required: false
+      schema:
+        type: string
   schemas:
     HealthStatus:
       type: object
@@ -33,4 +231,196 @@ components:
           type: string
       required:
         - status
+    Dashboard:
+      type: object
+      required: [operatingMode, systemStatus, productionPaused, nextAction, counts, rollout, shopify]
+      properties:
+        operatingMode: { type: string }
+        systemStatus: { type: string }
+        productionPaused: { type: boolean }
+        nextAction: { type: string }
+        counts:
+          type: object
+          required: [pipeline, needsLogan, needsEvidence, knowledgePending]
+          properties:
+            pipeline: { type: integer }
+            needsLogan: { type: integer }
+            needsEvidence: { type: integer }
+            knowledgePending: { type: integer }
+        rollout:
+          type: object
+          required: [reviewedDrafts, requiredDrafts, published, target]
+          properties:
+            reviewedDrafts: { type: integer }
+            requiredDrafts: { type: integer }
+            published: { type: integer }
+            target: { type: integer }
+        shopify:
+          type: object
+          required: [status, detail]
+          properties:
+            status: { type: string }
+            detail: { type: string }
+        recentActivity:
+          type: array
+          items: { $ref: "#/components/schemas/ActivityEvent" }
+        errors:
+          type: array
+          items: { $ref: "#/components/schemas/ActivityEvent" }
+    PipelineItem:
+      type: object
+      required: [id, title, stage, category, audience, decision, evidenceStatus, nextAction, isDevelopmentFixture]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        stage: { type: string }
+        category: { type: string }
+        audience: { type: string }
+        decision: { type: string }
+        evidenceStatus: { type: string }
+        nextAction: { type: string }
+        blockedReason: { type: ["string", "null"] }
+        scheduledDate: { type: ["string", "null"] }
+        isDevelopmentFixture: { type: boolean }
+    PipelineDetail:
+      allOf:
+        - $ref: "#/components/schemas/PipelineItem"
+        - type: object
+          required: [readerQuestion, questionProvenance, situation, problem, desiredOutcome, constraints, outline, evidenceBudget, approvedFacts, blockedClaims, contradictions, activity]
+          properties:
+            readerQuestion: { type: string }
+            questionProvenance: { type: string }
+            situation: { type: string }
+            problem: { type: string }
+            desiredOutcome: { type: string }
+            constraints:
+              type: array
+              items: { type: string }
+            outline:
+              type: array
+              items: { type: string }
+            evidenceBudget: { type: string }
+            approvedFacts:
+              type: array
+              items: { type: string }
+            blockedClaims:
+              type: array
+              items: { type: string }
+            contradictions:
+              type: array
+              items: { type: string }
+            activity:
+              type: array
+              items: { $ref: "#/components/schemas/ActivityEvent" }
+    ResearchCluster:
+      type: object
+      required: [id, status, canonicalQuestion, audience, decision, evidenceStatus, confidence, lastEvaluated, isDevelopmentFixture]
+      properties:
+        id: { type: string }
+        status: { type: string }
+        canonicalQuestion: { type: string }
+        audience: { type: string }
+        decision: { type: string }
+        evidenceStatus: { type: string }
+        confidence: { type: number }
+        lastEvaluated: { type: string }
+        supportingEvidence:
+          type: array
+          items: { type: string }
+        reviewReason: { type: ["string", "null"] }
+        isDevelopmentFixture: { type: boolean }
+    KnowledgeEntry:
+      type: object
+      required: [id, title, category, approvalState, sourceType, scope, freshness, publicUse, revision, supports, isDevelopmentFixture]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        category: { type: string }
+        approvalState: { type: string }
+        sourceType: { type: string }
+        scope: { type: string }
+        freshness: { type: string }
+        publicUse: { type: string }
+        revision: { type: integer }
+        supports:
+          type: array
+          items: { type: string }
+        contradictions:
+          type: array
+          items: { type: string }
+        isDevelopmentFixture: { type: boolean }
+    MerchantQuestion:
+      type: object
+      required: [id, question, missing, why, affects, scopeRequired, publicUse, status, isDevelopmentFixture]
+      properties:
+        id: { type: string }
+        question: { type: string }
+        missing: { type: string }
+        why: { type: string }
+        affects:
+          type: array
+          items: { type: string }
+        scopeRequired: { type: string }
+        publicUse: { type: string }
+        status: { type: string }
+        isDevelopmentFixture: { type: boolean }
+    MerchantAnswerInput:
+      type: object
+      required: [answer, scope, effectiveDate, publicUsePermission]
+      properties:
+        answer: { type: string, minLength: 1 }
+        scope: { type: string, minLength: 1 }
+        effectiveDate: { type: string, minLength: 1 }
+        publicUsePermission: { type: boolean }
+    CalendarEntry:
+      type: object
+      required: [id, date, title, status, detail, productionPaused]
+      properties:
+        id: { type: string }
+        date: { type: string }
+        title: { type: string }
+        status: { type: string }
+        detail: { type: string }
+        productionPaused: { type: boolean }
+    OwnerSettings:
+      type: object
+      required: [operatingMode, frequency, days, categories, geography, tone, depth, shopifyBlog, notifications, emergencyPause, lockedModes]
+      properties:
+        operatingMode: { type: string }
+        frequency: { type: string }
+        days:
+          type: array
+          items: { type: string }
+        categories:
+          type: array
+          items: { type: string }
+        geography: { type: string }
+        tone: { type: string }
+        depth: { type: string }
+        shopifyBlog: { type: string }
+        notifications: { type: boolean }
+        emergencyPause: { type: boolean }
+        lockedModes:
+          type: array
+          items: { type: string }
+    OwnerSettingsUpdate:
+      type: object
+      properties:
+        operatingMode: { type: string }
+        frequency: { type: string }
+        geography: { type: string }
+        tone: { type: string }
+        depth: { type: string }
+        notifications: { type: boolean }
+        emergencyPause: { type: boolean }
+    ActivityEvent:
+      type: object
+      required: [id, time, kind, summary, detail, needsAction]
+      properties:
+        id: { type: string }
+        time: { type: string }
+        kind: { type: string }
+        summary: { type: string }
+        detail: { type: string }
+        needsAction: { type: boolean }
 

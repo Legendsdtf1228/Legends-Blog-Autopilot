@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Legends Owner Console"
+description = "A polished owner-facing control center for Legends DTF Prints to understand research, evidence, knowledge, content readiness, questions, publishing schedules, and safety status without developer terminology."
+version = "1.0.0"
+id = "artifacts/owner-console"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20675
+
+[services.development]
+run = "pnpm --filter @workspace/owner-console run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/owner-console", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/owner-console/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20675"
+BASE_PATH = "/"
