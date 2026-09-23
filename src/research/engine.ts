@@ -31,6 +31,7 @@ import {
 } from "./rotation.js";
 import { demandFromSignals, formatCollectedLabel, growthFromSignals, scoreOpportunity } from "./scoring.js";
 import { evaluatePreGeneration } from "./editorialControls.js";
+import { buildIntentReaderQuestion, buildNaturalTitle } from "./naturalLanguage.js";
 import { isIncoherentSearchIntent } from "./semanticIntent.js";
 import { assessTopicSpecificity, suggestRefinement } from "./specificity.js";
 import { buildIntentOutline } from "./templateDetection.js";
@@ -111,26 +112,6 @@ function fitsLegends(pillar: string, keyword: string): boolean {
     /\b(apparel|shirt|dtf|print|brand|transfer|embroidery|entrepreneur|business|design|color|garment|uniform|hoodie)\b/.test(n) ||
     ["dtf_education", "apparel_garment", "design_color_branding", "apparel_business", "honest_entrepreneurship", "legends_story"].includes(pillar)
   );
-}
-
-function buildTitle(cluster: { primaryKeyword: string; format: string; intent: string; subcategory: string }): string {
-  const refinement = suggestRefinement(cluster.primaryKeyword);
-  if (refinement) return refinement.title;
-  const k = cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase());
-  if (cluster.format === "comparison" || cluster.intent === "commercial") {
-    return `${k}: Which Option Fits Your Apparel Project?`;
-  }
-  if (cluster.format === "first_person_story") {
-    return `${k}: Honest Lessons From Building a Print Business`;
-  }
-  if (cluster.format === "checklist") {
-    // Avoid pairing checklist titles with incoherent / story keywords.
-    if (/\bstories?\b/i.test(cluster.primaryKeyword) || isIncoherentSearchIntent(cluster.primaryKeyword)) {
-      return `${k}: Practical Questions Local Buyers Should Ask`;
-    }
-    return `${k}: A Decision Checklist for Apparel Buyers`;
-  }
-  return `${k}: What ${cluster.subcategory.replace(/\b\w/g, c => c.toUpperCase())} Buyers Should Know`;
 }
 
 function audienceForRefinement(refinementAudience: string, pillarAudiences: AudienceId[]): AudienceId {
@@ -312,9 +293,21 @@ export async function runResearchCycle(args: {
     // Prefer refinement metadata for either the raw seed or the (already refined) keyword.
     const refinementMeta =
       suggestRefinement(rawCluster.primaryKeyword) || suggestRefinement(cluster.primaryKeyword);
-    let proposedTitle = refinementMeta?.title || buildTitle(cluster);
     let readerQuestion = refinementMeta?.readerQuestion
-      || `What should ${AUDIENCE_LABELS[cluster.audience].toLowerCase()} know about ${cluster.primaryKeyword}?`;
+      || buildIntentReaderQuestion({
+        primaryKeyword: cluster.primaryKeyword,
+        audienceLabel: AUDIENCE_LABELS[cluster.audience],
+        format: cluster.format,
+        intent: cluster.intent
+      });
+    let proposedTitle = refinementMeta?.title || buildNaturalTitle({
+      primaryKeyword: cluster.primaryKeyword,
+      readerQuestion,
+      format: cluster.format,
+      intent: cluster.intent,
+      subcategory: cluster.subcategory,
+      variantKey: cluster.id
+    });
     let audienceLabel = refinementMeta?.audience || AUDIENCE_LABELS[cluster.audience];
     let proposedOutline = buildIntentOutline({
       primaryKeyword: cluster.primaryKeyword,

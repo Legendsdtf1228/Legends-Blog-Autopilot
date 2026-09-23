@@ -144,11 +144,11 @@ export function buildIntentOutline(args: {
       ];
     default:
       return [
-        `What ${args.audienceLabel.toLowerCase()} need to decide about ${k}`,
-        `Answer: ${q}`,
-        `Trade-offs specific to ${args.subcategory}`,
-        `Conditions and exceptions that change the answer`,
-        `A useful next step without a hard sell`
+        `The decision this reader is trying to make about ${k}`,
+        `What changes the answer for: ${q}`,
+        `Trade-offs tied to ${args.subcategory}`,
+        `Conditions that should change the recommendation`,
+        `A next step that fits the reader’s constraints`
       ];
   }
 }

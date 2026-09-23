@@ -5,6 +5,7 @@
 import { classifyContentPromise, type ContentPromise } from "./contentPromise.js";
 import { buildEvidenceBudget, type EvidenceBudget } from "./evidenceBudget.js";
 import { assessBriefDepth, type DepthAssessment } from "./depthGate.js";
+import { buildIntentReaderQuestion } from "./naturalLanguage.js";
 import { isIncoherentSearchIntent, suggestLocalPrinterRefinement, titleRepresentsSearchQuestion } from "./semanticIntent.js";
 import { buildIntentOutline } from "./templateDetection.js";
 import type { LockedFactSheet, TopicDecision } from "./types.js";
@@ -140,7 +141,12 @@ export function evaluatePreGeneration(args: {
   ) {
     outline = buildIntentOutline({
       primaryKeyword: keyword,
-      readerQuestion: readerQuestion || `What should readers know about ${keyword}?`,
+      readerQuestion: readerQuestion || buildIntentReaderQuestion({
+        primaryKeyword: keyword,
+        audienceLabel: audience || "a reader",
+        format: args.format,
+        intent
+      }),
       promiseClass: contentPromise.primaryClass,
       audienceLabel: audience || "readers",
       subcategory: args.pillar || "general"

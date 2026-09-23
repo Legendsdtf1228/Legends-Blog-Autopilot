@@ -6,6 +6,7 @@ import { findClosestOverlap, isRejectedByOverlap, type ExistingArticleRef } from
 import { AUDIENCE_LABELS, DEFAULT_RESEARCH_SETTINGS, pillarById } from "./pillars.js";
 import { selectProductsForKeyword } from "./productSelection.js";
 import { isIncoherentSearchIntent } from "./semanticIntent.js";
+import { buildIntentReaderQuestion, buildNaturalTitle } from "./naturalLanguage.js";
 import { assessTopicSpecificity, suggestRefinement } from "./specificity.js";
 import { buildIntentOutline } from "./templateDetection.js";
 import { buildSeoDeliverables } from "./seo.js";
@@ -266,13 +267,25 @@ export function evaluateCustomTopic(topic: string, args: {
     };
   }
 
+  let audienceLabel = (shouldRefine && refinement?.audience) || AUDIENCE_LABELS[cluster.audience];
   let readerQuestion = shouldRefine && refinement?.readerQuestion
     ? refinement.readerQuestion
-    : `What should readers know about ${cluster.primaryKeyword}?`;
+    : buildIntentReaderQuestion({
+        primaryKeyword: cluster.primaryKeyword,
+        audienceLabel,
+        format: cluster.format,
+        intent: cluster.intent
+      });
   let proposedTitle = shouldRefine && refinement?.title
     ? refinement.title
-    : `${cluster.primaryKeyword.replace(/\b\w/g, c => c.toUpperCase())}: What Buyers Should Know`;
-  let audienceLabel = (shouldRefine && refinement?.audience) || AUDIENCE_LABELS[cluster.audience];
+    : buildNaturalTitle({
+        primaryKeyword: cluster.primaryKeyword,
+        readerQuestion,
+        format: cluster.format,
+        intent: cluster.intent,
+        subcategory: cluster.subcategory,
+        variantKey: `custom:${cluster.primaryKeyword}`
+      });
   const promiseHint = classifyContentPromise({
     title: proposedTitle,
     primaryKeyword: cluster.primaryKeyword,
