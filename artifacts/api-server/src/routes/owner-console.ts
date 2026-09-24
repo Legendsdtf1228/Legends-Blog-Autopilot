@@ -17,6 +17,7 @@ import {
   UpdateOwnerSettingsBody,
   UpdateOwnerSettingsResponse,
 } from "@workspace/api-zod";
+import { getM5RolloutReadout } from "../lib/m5-owner-console-gateway";
 import {
   addOwnerActivity,
   getOwnerConsoleRecord,
@@ -67,11 +68,12 @@ function isValidDateOnly(value: string): boolean {
 }
 
 router.get("/dashboard", async (req, res): Promise<void> => {
-  const [pipelineRecords, questionRecords, knowledgeRecords, activities] = await Promise.all([
+  const [pipelineRecords, questionRecords, knowledgeRecords, activities, rolloutState] = await Promise.all([
     listOwnerConsoleRecords("pipeline"),
     listOwnerConsoleRecords("question"),
     listOwnerConsoleRecords("knowledge"),
     listOwnerConsoleRecords("activity"),
+    getM5RolloutReadout(),
   ]);
   const pipeline = payloads(pipelineRecords);
   const questions = payloads(questionRecords);
@@ -79,7 +81,9 @@ router.get("/dashboard", async (req, res): Promise<void> => {
   const activity = payloads(activities).map(sanitizeActivity);
   const data = GetDashboardResponse.parse({
     operatingMode: "draft_only",
-    systemStatus: "Development preview",
+    systemStatus: rolloutState.available
+      ? `M5 connected · authoritative rollout ${rolloutState.rolloutMode}; console is read-only`
+      : "M5 rollout state unavailable · fail-closed",
     productionPaused: true,
     nextAction:
       "Review source evidence and owner scope before moving any draft forward.",
@@ -97,10 +101,10 @@ router.get("/dashboard", async (req, res): Promise<void> => {
       ).length,
     },
     rollout: {
-      reviewedDrafts: 0,
-      requiredDrafts: 0,
-      published: 0,
-      target: 0,
+      reviewedDrafts: rolloutState.reviewedDrafts,
+      requiredDrafts: rolloutState.requiredDrafts,
+      published: rolloutState.published,
+      target: rolloutState.target,
     },
     shopify: {
       status: "Disabled",

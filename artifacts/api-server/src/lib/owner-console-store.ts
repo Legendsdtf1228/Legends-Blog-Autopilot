@@ -7,6 +7,11 @@ import {
   ownerConsoleSettingsTable,
 } from "@workspace/db";
 import type { OwnerConsoleRecord } from "@workspace/db";
+import {
+  answerM5InterviewQuestion,
+  hasM5DomainData,
+  readM5OwnerRecords,
+} from "./m5-owner-console-gateway";
 
 type RecordKind =
   | "pipeline"
@@ -362,22 +367,13 @@ function fixtureRecords(): Array<{
 
 export async function ensureDevelopmentFixtures(): Promise<void> {
   if (!developmentOnly()) return;
+  if (await hasM5DomainData()) return;
 
   const existing = await db
     .select({ id: ownerConsoleRecordsTable.id })
     .from(ownerConsoleRecordsTable)
     .limit(1);
   if (existing.length > 0) return;
-
-  const [existingAnswer] = await db
-    .select({ id: ownerConsoleAnswersTable.id })
-    .from(ownerConsoleAnswersTable)
-    .limit(1);
-  const [existingSettings] = await db
-    .select({ id: ownerConsoleSettingsTable.id })
-    .from(ownerConsoleSettingsTable)
-    .limit(1);
-  if (existingAnswer || existingSettings) return;
 
   const otherApplicationTables = await db.execute(sql`
     SELECT EXISTS (
@@ -403,6 +399,9 @@ export async function ensureDevelopmentFixtures(): Promise<void> {
 export async function listOwnerConsoleRecords(
   kind: RecordKind,
 ): Promise<OwnerConsoleRecord[]> {
+  const m5 = await readM5OwnerRecords(kind);
+  if (m5.hasDomainData) return m5.records;
+  if (!developmentOnly()) return [];
   await ensureDevelopmentFixtures();
   return db
     .select()
@@ -415,18 +414,8 @@ export async function getOwnerConsoleRecord(
   id: string,
   kind: RecordKind,
 ): Promise<OwnerConsoleRecord | undefined> {
-  await ensureDevelopmentFixtures();
-  const [record] = await db
-    .select()
-    .from(ownerConsoleRecordsTable)
-    .where(
-      and(
-        eq(ownerConsoleRecordsTable.id, id),
-        eq(ownerConsoleRecordsTable.kind, kind),
-      ),
-    )
-    .limit(1);
-  return record;
+  const records = await listOwnerConsoleRecords(kind);
+  return records.find((record) => record.id === id);
 }
 
 export async function getOwnerConsoleSettings(): Promise<Record<string, unknown>> {
@@ -435,7 +424,7 @@ export async function getOwnerConsoleSettings(): Promise<Record<string, unknown>
     .from(ownerConsoleSettingsTable)
     .where(eq(ownerConsoleSettingsTable.id, 1))
     .limit(1);
-  if (stored) return stored.payload;
+  if (stored) return { ...stored.payload, operatingMode: "draft_only", emergencyPause: true };
 
   return defaultSettings;
 }
@@ -444,7 +433,7 @@ export async function saveOwnerConsoleSettings(
   patch: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const current = await getOwnerConsoleSettings();
-  const next = { ...current, ...patch, emergencyPause: true };
+  const next = { ...current, ...patch, operatingMode: "draft_only", emergencyPause: true };
   await db
     .insert(ownerConsoleSettingsTable)
     .values({ id: 1, payload: next })
@@ -462,6 +451,17 @@ export async function saveOwnerAnswer(input: {
   effectiveDate: string;
   publicUsePermission: boolean;
 }): Promise<void> {
+  if (await hasM5DomainData()) {
+    await answerM5InterviewQuestion({
+      questionId: input.questionId,
+      answer: input.answer,
+      scope: input.scope,
+      effectiveDate: input.effectiveDate,
+    });
+    return;
+  }
+  if (!developmentOnly()) throw new Error("QUESTION_NOT_FOUND");
+  await ensureDevelopmentFixtures();
   await db.transaction(async (tx) => {
     const [question] = await tx
       .select()
@@ -485,7 +485,7 @@ export async function saveOwnerAnswer(input: {
         answer: input.answer,
         scope: input.scope,
         effectiveDate: input.effectiveDate,
-        publicUsePermission: input.publicUsePermission,
+        publicUsePermission: false,
         status: "pending_review",
       });
     } catch (error) {
