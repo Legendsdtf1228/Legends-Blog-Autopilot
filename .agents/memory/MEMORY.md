@@ -1,1 +1,2 @@
 - [Local PostgreSQL test lifetime](local-postgres-lifetime.md) — keep disposable database servers in managed background shells.
+- [Accepted owner-console checkpoint](owner-console-acceptance.md) — acceptance is a fixed code checkpoint, not permission to merge or deploy.

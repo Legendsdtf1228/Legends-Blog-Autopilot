@@ -1,0 +1,27 @@
+Checkpoint: 33995a82c48114c064285cdc9329a8ebe4ff9d45
+Node: v24.13.0
+PostgreSQL used in previous database checks: 16.10 (disposable, now removed)
+Dependency source: unchanged package-lock.json (npm ci --ignore-scripts --no-audit --no-fund, 151 packages)
+
+$ npm run typecheck
+
+> legends-blog-autopilot@0.2.0 typecheck
+> tsc -p tsconfig.json --noEmit
+
+Result: PASS (exit 0)
+
+$ npm run lint
+
+> legends-blog-autopilot@0.2.0 lint
+> tsc -p tsconfig.json --noEmit
+
+Result: PASS (exit 0; script is tsc --noEmit, not ESLint)
+
+$ npm run build
+
+> legends-blog-autopilot@0.2.0 build
+> tsc -p tsconfig.json
+
+Result: PASS (exit 0); emitted files: 77
+
+Configured tsconfig includes src/**/*.ts; excludes test.

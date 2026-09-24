@@ -1,0 +1,44 @@
+Verified checkpoint and remote ref:
+33995a82c48114c064285cdc9329a8ebe4ff9d45
+33995a82c48114c064285cdc9329a8ebe4ff9d45	refs/heads/replit/owner-console
+
+Single-parent ancestry since accepted M5 base:
+33995a82c48114c064285cdc9329a8ebe4ff9d45 0bbad3857311c5cf0ef637dae6bf8ee6f890d70d
+0bbad3857311c5cf0ef637dae6bf8ee6f890d70d 26da6a826312f3ba870dc359fc00dc038d3d0f18
+
+Accepted base is an ancestor: yes
+Commits after base: 2
+
+Diff files from base:
+M	README.md
+A	public/assets/owner-console.css
+M	src/db.ts
+A	src/ownerConsole.ts
+M	src/server.ts
+M	src/views.ts
+A	test/owner-console.test.ts
+
+Latest commit files:
+M	src/ownerConsole.ts
+A	test/owner-console.test.ts
+
+Diff whitespace: clean
+Isolated working tree: clean
+Package/lockfile changed: no
+
+Migration snapshot equality excluding volatile raw dump hash: pass
+Normalized schema dump equality: pass
+Normalized schema SHA256:
+c721f97dcde622dfbe23a3c4a5ff3e92078417a43443dc67e58e9e1d5b205631  /home/runner/workspace/verification/m5-owner-console/evidence/schema-before-normalized.sql
+c721f97dcde622dfbe23a3c4a5ff3e92078417a43443dc67e58e9e1d5b205631  /home/runner/workspace/verification/m5-owner-console/evidence/schema-after-normalized.sql
+Migration records: 11
+Default enabled=false; draftOnlyMode=true; rolloutMode=draft_only
+
+Full test TAP summary:
+ℹ suites 0
+ℹ pass 273
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 29840.810813

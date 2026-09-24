@@ -1,0 +1,10 @@
+acb801d96794a5b1192092fa725c955f274a48bde8dc1ccc6c788cb77325fa42  ./branch-and-migrations.txt
+1e8bef6863863eaa799c64b645b974d3415cfa7d3892d4841d5c5c0102e5f4ff  ./dump-after.sql
+cf576ccd254b52eea1e084963a4267159313f6a23cb1f02e4ebe473628ff225e  ./dump-before.sql
+4cd3ef90b88288e83ae3a1c6a1fdf884e8cead8ae5616d8250cb12990a632f86  ./full-test-suite.log
+8ef796e1e41aad13af68002e19d77a103f90873bf00ce2acacd27d019b8da047  ./migration-first.txt
+29507506ee538591e88c4b02003f3073ece0edf72ac24157f8acaea4b130488d  ./migration-second.txt
+c721f97dcde622dfbe23a3c4a5ff3e92078417a43443dc67e58e9e1d5b205631  ./schema-after-normalized.sql
+c721f97dcde622dfbe23a3c4a5ff3e92078417a43443dc67e58e9e1d5b205631  ./schema-before-normalized.sql
+4f3e8e6dfa3c1c7d5d7741c4291c9d0e24c381ec63b5fbc4c5409a684911283b  ./static-checks.txt
+29ed6828cac9177dfb732369d97db54a835604e5788b8f22f11c5bdc89ae046e  ./test-files.txt
