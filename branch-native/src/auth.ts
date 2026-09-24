@@ -11,6 +11,7 @@ export interface AuthedRequest extends Request {
     mode: AuthMode;
     user: string;
     shop?: string;
+    verifiedBearerForRequest?: boolean;
   };
 }
 
@@ -128,7 +129,12 @@ export function createAuthMiddleware(config: AppConfig, db: Db) {
       const token = authHeader.slice(7).trim();
       try {
         const verified = await verifyShopifySessionToken(token, config);
-        req.auth = { mode: "shopify_session_token", user: verified.sub || "shopify-user", shop: verified.shop };
+        req.auth = {
+          mode: "shopify_session_token",
+          user: verified.sub || "shopify-user",
+          shop: verified.shop,
+          verifiedBearerForRequest: true
+        };
         return next();
       } catch {
         // Fall through to other auth methods for standalone use
@@ -181,6 +187,21 @@ export function createAuthMiddleware(config: AppConfig, db: Db) {
   };
 }
 
+export function createOwnerAuthorization(config: AppConfig) {
+  return function requireOwner(req: AuthedRequest, res: Response, next: NextFunction) {
+    const configuredOwner = config.OWNER_USERNAME?.trim();
+    const authorized =
+      Boolean(configuredOwner) &&
+      req.auth?.mode === "session" &&
+      req.auth.user === configuredOwner;
+
+    if (!authorized) {
+      return res.status(403).send("Owner authorization required");
+    }
+    return next();
+  };
+}
+
 function embeddedAuthHelp(config: AppConfig) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="shopify-api-key" content="${config.SHOPIFY_CLIENT_ID}">
@@ -214,4 +235,14 @@ export function verifyCsrf(sessionId: string | undefined, token: string | undefi
   if (!sessionId || !token) return false;
   const expected = csrfTokenFromSession(sessionId, secret);
   return safeEqual(expected, token);
+}
+
+export function csrfRequestAuthorized(
+  req: AuthedRequest,
+  sessionId: string | undefined,
+  token: string | undefined,
+  secret: string
+): boolean {
+  if (req.auth?.verifiedBearerForRequest === true) return true;
+  return verifyCsrf(sessionId, token, secret);
 }

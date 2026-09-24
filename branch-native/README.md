@@ -3,8 +3,9 @@
 ## Owner console branch
 
 The `replit/owner-console` branch adds a branch-native workspace at `/owner/`
-inside this Express app. Sign in with the existing standalone M5 credentials;
-the console uses the same session, CSRF protection, PostgreSQL connection, and
+inside this Express app. Set `OWNER_USERNAME` to the standalone administrator
+identity, then sign in with that account; missing owner configuration fails closed.
+The console uses the same session, CSRF protection, PostgreSQL connection, and
 M5 research/knowledge records. It adds only a separate table for safe drafting
 preferences. No monorepo runtime or second server is required.
 
@@ -54,6 +55,7 @@ Topic research covers six content pillars (DTF education, garment knowledge, des
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ADMIN_USERNAME` | `admin` | Standalone username |
+| `OWNER_USERNAME` | none | Exact standalone cookie-session identity permitted to access owner-only routes |
 | `SESSION_SECRET` | derived | Cookie/CSRF signing secret |
 | `SHOPIFY_API_VERSION` | `2026-07` | Admin API version |
 | `STOREFRONT_URL` | `https://legendsdtf.com` | Public storefront for product links |

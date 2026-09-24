@@ -37,11 +37,12 @@ import {
   clearSessionCookie,
   createAuthMiddleware,
   createDbSession,
+  createOwnerAuthorization,
+  csrfRequestAuthorized,
   csrfTokenFromSession,
   destroyDbSession,
   parseCookies,
   setSessionCookie,
-  verifyCsrf,
   verifyShopifySessionToken,
   type AuthedRequest
 } from "./auth.js";
@@ -62,8 +63,6 @@ import {
 } from "./views.js";
 import type { ArticleContent, GenerationSettings, Settings } from "./types.js";
 import {
-  applyInterviewAnswers,
-  attachBriefArticle,
   buildArticleBrief,
   CONTENT_PILLARS,
   createInterviewDraft,
@@ -72,25 +71,19 @@ import {
   getEvidenceReportForArticle,
   getInterviewForBrief,
   getOpportunity,
-  interviewAnswersAsFacts,
   latestCycleMeta,
   listOpportunities,
   listPillarUsage,
   IncompleteInventoryError,
   loadContentInventory,
   markOpportunityStatus,
-  qualityGatesPassed,
-  recordPillarUsage,
   releaseOpportunity,
   researchSettingsFromApp,
   reserveOpportunity,
-  runQualityGates,
   runResearchCycle,
   saveBrief,
-  saveEvidenceReport,
   saveInterview,
   saveResearchCycle,
-  storeApprovedInterviewKnowledge,
   getSourceIngestionHealth,
   getClusterHealth,
   getKnowledgeRegistryHealth,
@@ -190,11 +183,8 @@ function getCsrf(req: AuthedRequest): string {
 }
 
 function requireCsrf(req: AuthedRequest, res: express.Response): boolean {
-  // Bearer Shopify session-token requests are CSRF-resistant (custom header)
-  if (req.auth?.mode === "shopify_session_token") return true;
-  if (req.headers.authorization?.startsWith("Bearer ")) return true;
   const token = String(req.body?._csrf || req.headers["x-csrf-token"] || "");
-  if (verifyCsrf(csrfKey(req), token, config.SESSION_SECRET)) return true;
+  if (csrfRequestAuthorized(req, csrfKey(req), token, config.SESSION_SECRET)) return true;
   res.status(403).send(layout({
     active: "/",
     config,
@@ -291,14 +281,15 @@ app.get("/logout", async (req, res) => {
 });
 
 const requireAuth = createAuthMiddleware(config, db);
+const requireOwner = createOwnerAuthorization(config);
 
 app.use(apiLimiter);
 app.use(requireAuth);
 
-// Branch-native owner surface shares M5 authentication, CSRF and database.
+// Owner access requires a separately configured standalone cookie-session identity.
 const ownerRouter = express.Router();
 mountOwnerConsole(ownerRouter, db, getCsrf, requireCsrf);
-app.use("/owner", ownerRouter);
+app.use("/owner", requireOwner, ownerRouter);
 
 // ---- Overview ----
 app.get("/", async (req: AuthedRequest, res) => {
@@ -635,29 +626,9 @@ app.get("/research/briefs/:id/interview", async (req: AuthedRequest, res) => {
   }));
 });
 
-app.post("/research/briefs/:id/interview", async (req: AuthedRequest, res) => {
+app.post("/research/briefs/:id/interview", requireOwner, async (req: AuthedRequest, res) => {
   if (!requireCsrf(req, res)) return;
-  const id = Number(req.params.id);
-  const brief = await getBrief(db, id);
-  if (!brief) return res.redirect("/research?error=" + encodeURIComponent("Brief not found."));
-  let interview = await getInterviewForBrief(db, id);
-  if (!interview) interview = createInterviewDraft(id);
-  const answers: Record<string, string> = {};
-  for (const q of interview.questions) answers[q.id] = String(req.body[q.id] || "");
-  interview = await saveInterview(db, applyInterviewAnswers(interview, answers));
-  if (interview.completed) {
-    const facts = [...brief.factSheet.businessFacts, ...interviewAnswersAsFacts(interview)];
-    brief.factSheet = { ...brief.factSheet, businessFacts: facts };
-    brief.status = "approved";
-    await updateBrief(db, id, brief);
-    await storeApprovedInterviewKnowledge(db, {
-      interview,
-      topicClass: brief.contentPromiseClass || brief.format || "firsthand_experience",
-      briefId: id,
-      approvedBy: actor(req)
-    });
-  }
-  res.redirect(`/research/briefs/${id}?notice=${encodeURIComponent(interview.completed ? "Interview saved. You can approve and generate." : "Interview saved. Complete every answer (8+ chars) to unlock generation.")}`);
+  return res.status(423).send("Legacy interview approval is disabled for this owner-console release.");
 });
 
 app.post("/research/briefs/:id/choose-another", async (req: AuthedRequest, res) => {
@@ -673,135 +644,9 @@ app.post("/research/briefs/:id/choose-another", async (req: AuthedRequest, res) 
   res.redirect("/research?notice=" + encodeURIComponent("Brief rejected. Choose another opportunity."));
 });
 
-app.post("/research/briefs/:id/approve-generate", async (req: AuthedRequest, res) => {
+app.post("/research/briefs/:id/approve-generate", requireOwner, async (req: AuthedRequest, res) => {
   if (!requireCsrf(req, res)) return;
-  const id = Number(req.params.id);
-  const settings = await getSettings(db);
-  const brief = await getBrief(db, id);
-  if (!brief) return res.redirect("/research?error=" + encodeURIComponent("Brief not found."));
-
-  if (brief.requiresInterview) {
-    const interview = await getInterviewForBrief(db, id);
-    if (!interview?.completed) {
-      return res.redirect(`/research/briefs/${id}/interview`);
-    }
-    brief.factSheet = {
-      ...brief.factSheet,
-      businessFacts: [...brief.factSheet.businessFacts, ...interviewAnswersAsFacts(interview)]
-    };
-  }
-
-  brief.status = "approved";
-  await updateBrief(db, id, brief);
-  await markOpportunityStatus(db, brief.opportunityId, "approved");
-
-  const placeholder = await createArticle(db, {
-    title: brief.proposedTitle,
-    handle: brief.proposedHandle || "generating",
-    author: settings.authorName,
-    primaryKeyword: brief.primaryKeyword,
-    excerpt: "",
-    metaTitle: brief.proposedTitle,
-    metaDescription: "",
-    bodyHtml: "",
-    tags: [],
-    featuredImageUrl: null,
-    featuredImageAlt: null,
-    secondaryKeywords: brief.secondaryKeywords,
-    topicFingerprint: brief.primaryKeyword.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80),
-    rationale: brief.whyDistinct
-  }, {
-    status: "generating",
-    source: "research",
-    generationSettings: {
-      briefId: brief.id,
-      pillar: brief.pillar,
-      format: brief.format,
-      audience: brief.audience,
-      draftOnly: true
-    }
-  });
-
-  try {
-    const { products, warning } = await getProductLinks(config, settings.storefrontUrl);
-    const recentTopics = await recentTopicContext(db);
-    const generated = await generateArticle({
-      apiKey: config.OPENAI_API_KEY,
-      model: settings.openaiModel || config.OPENAI_MODEL,
-      settings: { ...settings, draftOnlyMode: true },
-      products: products.length ? products : brief.productsToFeature.map(p => ({ title: p.title, url: p.url })),
-      recentTopics,
-      brief,
-      generation: {
-        topic: brief.proposedTitle,
-        articleType: brief.format,
-        primaryKeyword: brief.primaryKeyword,
-        secondaryKeywords: brief.secondaryKeywords,
-        targetAudience: brief.targetAudienceLabel,
-        productFocus: brief.productsToFeature.map(p => p.title),
-        callToAction: settings.defaultCta,
-        internalLinking: true,
-        draftOnly: true
-      }
-    });
-
-    const draftFields = {
-      title: generated.title,
-      handle: generated.handle,
-      excerpt: generated.summary,
-      metaTitle: generated.title,
-      metaDescription: generated.metaDescription,
-      bodyHtml: generated.bodyHtml,
-      primaryKeyword: generated.primaryKeyword,
-      secondaryKeywords: brief.secondaryKeywords
-    };
-    const evidence = runQualityGates({ brief, draft: draftFields });
-    const gatesOk = qualityGatesPassed(evidence);
-
-    const updated = await updateArticle(db, placeholder.id, {
-      ...normalizeArticle(fromGenerated(generated, settings.authorName), { author: settings.authorName }).content,
-      status: "draft",
-      generationError: gatesOk ? null : "Quality gates flagged issues — review evidence report before publishing.",
-      lastError: warning || (gatesOk ? null : evidence.reviewFlags.join("; ").slice(0, 500))
-    });
-    await attachBriefArticle(db, id, placeholder.id);
-    await saveEvidenceReport(db, placeholder.id, id, evidence);
-    await markOpportunityStatus(db, brief.opportunityId, "used");
-    await recordPillarUsage(db, {
-      pillar: brief.pillar,
-      subcategory: brief.subcategory,
-      audience: brief.audience,
-      format: brief.format,
-      primaryKeyword: brief.primaryKeyword,
-      articleId: placeholder.id,
-      usedAt: new Date().toISOString()
-    });
-    await recordAudit(db, {
-      actor: actor(req),
-      action: "research_article_generated",
-      articleId: placeholder.id,
-      detail: { briefId: id, gatesOk, reviewFlags: evidence.reviewFlags }
-    });
-
-    const notice = gatesOk
-      ? "Draft generated from research brief. Review before publishing."
-      : "Draft saved with quality-gate flags. Review the evidence report before publishing.";
-    res.redirect(`/articles/${updated!.id}?notice=${encodeURIComponent(notice)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await updateArticle(db, placeholder.id, {
-      status: "failed",
-      generationError: message,
-      lastError: message
-    });
-    await recordAudit(db, {
-      actor: actor(req),
-      action: "research_article_generation_failed",
-      articleId: placeholder.id,
-      detail: { error: message, briefId: id }
-    });
-    res.redirect(`/research/briefs/${id}?error=${encodeURIComponent(message)}`);
-  }
+  return res.status(423).send("Legacy brief approval and generation are disabled for this owner-console release.");
 });
 
 app.post("/autopilot/pause", async (req: AuthedRequest, res) => {

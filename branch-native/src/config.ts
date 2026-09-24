@@ -12,6 +12,7 @@ const schema = z.object({
   STOREFRONT_URL: z.string().url().default("https://legendsdtf.com"),
   ADMIN_USERNAME: z.string().default("admin"),
   ADMIN_PASSWORD: z.string().min(12),
+  OWNER_USERNAME: z.string().min(1).optional(),
   SESSION_SECRET: z.string().min(16).optional(),
   APP_URL: z.string().url().default("http://localhost:3000"),
   PORT: z.coerce.number().int().positive().default(3000),
