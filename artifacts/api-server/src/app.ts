@@ -30,5 +30,12 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
+app.use((_req, res) => {
+  res.status(404).json({ error: "Not found." });
+});
+app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  req.log.error({ err: error }, "Unhandled API error");
+  res.status(500).json({ error: "Internal server error." });
+});
 
 export default app;

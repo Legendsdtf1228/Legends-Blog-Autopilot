@@ -35,27 +35,21 @@ function toError(value: unknown): Error {
   }
 }
 
-function DefaultFallback({ error, resetError }: ErrorFallbackProps) {
+function DefaultFallback({ resetError }: ErrorFallbackProps) {
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-gray-50 p-6">
-      <div className="max-w-lg w-full text-center">
-        <h1 className="text-xl font-semibold text-gray-900">
-          Something went wrong
+    <div className="min-h-[100dvh] w-full flex items-center justify-center bg-[#f4efe5] p-6">
+      <div className="w-full max-w-lg rounded-xl border border-[#d9d0c1] bg-[#fbf8f1] p-8 text-center shadow-[0_12px_30px_rgba(38,43,58,.08)]">
+        <div className="font-mono-ui text-[10px] uppercase tracking-[.18em] text-[#b85c2c]">Console safeguard</div>
+        <h1 className="mt-3 font-display text-3xl text-[#262b3a]">
+          This view needs a reset.
         </h1>
-        <p className="mt-2 text-sm text-gray-600">
-          This part of the app hit an error. The rest of the app is still
-          running.
+        <p className="mt-2 text-sm leading-6 text-[#687080]">
+          The console kept production safe, but this view could not finish loading. Try again without exposing any internal details.
         </p>
-        {/* Dev only: messages can carry API responses and other internals. */}
-        {import.meta.env.DEV ? (
-          <pre className="mt-4 overflow-x-auto rounded bg-gray-100 p-3 text-left text-xs text-gray-800">
-            {error.message || String(error)}
-          </pre>
-        ) : null}
         <button
           type="button"
           onClick={resetError}
-          className="mt-4 rounded bg-gray-900 px-4 py-2 text-sm text-white hover:bg-gray-700"
+          className="mt-6 rounded-lg bg-[#262b3a] px-4 py-2.5 text-sm font-semibold text-[#fbf8f1] hover:bg-[#30394d]"
         >
           Try again
         </button>
