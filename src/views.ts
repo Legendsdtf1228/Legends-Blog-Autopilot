@@ -12,6 +12,7 @@ export const selected = (a: string, b: string) => (a === b ? "selected" : "");
 function nav(active: string) {
   const items = [
     ["/", "Overview"],
+    ["/owner/", "Owner Console"],
     ["/research", "Research"],
     ["/articles", "Articles"],
     ["/articles/new", "New Article"],
@@ -298,8 +299,7 @@ export function articleEditorPage(args: {
         <button form="regen-excerpt" type="submit">Regenerate excerpt</button>
         <button form="regen-seo" type="submit">Regenerate SEO</button>
         <button form="regen-body" type="submit">Regenerate body</button>
-        <button form="publish-now" class="primary" type="submit">Publish immediately</button>
-        <button form="schedule" type="submit">Schedule publication</button>
+        <p class="muted">Production paused: publishing and scheduling are unavailable on this branch.</p>
         <button form="cancel-schedule" type="submit">Cancel schedule</button>
         <button form="duplicate" type="submit">Duplicate</button>
         <button form="archive" type="submit">Archive</button>
@@ -407,8 +407,8 @@ export function settingsPage(args: {
     <input type="hidden" name="_csrf" value="${esc(args.csrf)}">
     <section class="card">
       <h2>Publishing & store</h2>
-      <label class="toggle"><input type="checkbox" name="enabled" ${checked(s.enabled)}> Automatic publishing enabled (Autopilot)</label>
-      <label class="toggle"><input type="checkbox" name="draftOnlyMode" ${checked(s.draftOnlyMode)}> Draft-only mode (generate without publishing)</label>
+      <p class="muted">Owner-console branch: production paused, draft-only, and automatic publishing disabled. These controls are locked.</p>
+      <input type="hidden" name="draftOnlyMode" value="on">
       <div class="row">
         <label>Cadence<select name="cadence"><option value="daily" ${selected(s.cadence, "daily")}>Once daily</option><option value="twice_daily" ${selected(s.cadence, "twice_daily")}>Twice daily</option></select></label>
         <label>Timezone<input name="timezone" value="${esc(s.timezone)}"></label>
@@ -448,13 +448,7 @@ export function settingsPage(args: {
       <h3>Topic research</h3>
       <label class="toggle"><input type="checkbox" name="researchEnabled" ${checked(s.research.enabled)}> Enable research cycles</label>
       <label>Rollout mode
-        <select name="rolloutMode">
-          <option value="paused" ${selected(s.rolloutMode, "paused")}>PAUSED</option>
-          <option value="observe" ${selected(s.rolloutMode, "observe")}>OBSERVE</option>
-          <option value="draft_only" ${selected(s.rolloutMode, "draft_only")}>DRAFT_ONLY</option>
-          <option value="shadow_auto" ${selected(s.rolloutMode, "shadow_auto")}>SHADOW_AUTO</option>
-          <option value="auto_publish" ${selected(s.rolloutMode, "auto_publish")}>AUTO_PUBLISH (explicit only)</option>
-        </select>
+        <select name="rolloutMode"><option value="paused">PAUSED (locked)</option></select>
       </label>
       <label>Research cadence
         <select name="researchCadence">
@@ -471,9 +465,7 @@ export function settingsPage(args: {
         <label>Max articles / cycle<input type="number" name="maxArticlesPerCycle" min="1" max="5" value="${s.frequencyLimits.maxArticlesPerCycle}"></label>
       </div>
       <label class="toggle"><input type="checkbox" name="researchRequireInterview" ${checked(s.research.requireInterviewForFirstPerson)}> Require merchant interview for first-person stories</label>
-      <label class="toggle"><input type="checkbox" name="activateAutoPublish" ${checked(false)}> Explicitly activate AUTO_PUBLISH (only after promotion gates)</label>
       <p class="muted">Promotion requires ${s.promotionThresholds.minConsecutiveReviewedDrafts} reviewed drafts, ${Math.round(s.promotionThresholds.minMerchantApprovalRate * 100)}% approval, and ${s.promotionThresholds.minShadowAutoDays} SHADOW_AUTO days. Current: ${s.promotionProgress.consecutiveReviewedDrafts} drafts · ${Math.round(s.promotionProgress.merchantApprovalRate * 100)}% · ${s.promotionProgress.shadowAutoDays} days.</p>
-      <label class="toggle"><input type="checkbox" name="clearKillSwitch" ${checked(false)}> Clear kill switch (after remediation)</label>
       <h3>Secrets (Railway only)</h3>
       <ul class="list muted">
         <li>OPENAI_API_KEY: ${secret(Boolean(args.config.OPENAI_API_KEY))}</li>

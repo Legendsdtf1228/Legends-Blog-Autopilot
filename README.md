@@ -1,5 +1,21 @@
 # Legends Blog Autopilot
 
+## Owner console branch
+
+The `replit/owner-console` branch adds a branch-native workspace at `/owner/`
+inside this Express app. Sign in with the existing standalone M5 credentials;
+the console uses the same session, CSRF protection, PostgreSQL connection, and
+M5 research/knowledge records. It adds only a separate table for safe drafting
+preferences. No monorepo runtime or second server is required.
+
+This branch locks the scheduler, rollout settings, manual publishing, and
+publication scheduling in a paused, draft-only posture. Interview answers
+flow through M5's pending-knowledge path; answering never grants knowledge
+approval or public-use eligibility. To verify locally with a disposable
+PostgreSQL database, set the required environment variables listed below,
+run `npm ci`, `npm run typecheck`, `npm test`, and `npm run dev`, then visit
+`/owner/` after logging in. Do not deploy this branch as a publishing rollout.
+
 Production-ready Shopify blogging application for **Legends DTF Prints**. It generates, edits, validates, schedules, and publishes blog articles with Autopilot safety controls.
 
 ## Current architecture

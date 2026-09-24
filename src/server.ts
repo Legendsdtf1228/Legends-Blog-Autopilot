@@ -32,6 +32,7 @@ import { getProductLinks, listBlogs, publishArticle, searchProducts, verifyShopi
 import { diagnoseOpenAI, generateArticle } from "./writer.js";
 import { fromGenerated, normalizeArticle, toGenerated, validateArticle } from "./content.js";
 import { mergeSettings } from "./defaults.js";
+import { mountOwnerConsole } from "./ownerConsole.js";
 import {
   clearSessionCookie,
   createAuthMiddleware,
@@ -100,9 +101,19 @@ import {
 } from "./research/index.js";
 
 const config = loadConfig();
+const OWNER_CONSOLE_PRODUCTION_PAUSED = true;
 const db = createDb(config.DATABASE_URL);
 await migrate(db);
+// Enforce the branch's rollout boundary before any scheduler tick can run.
+const initialSettings = await getSettings(db);
+initialSettings.enabled = false;
+initialSettings.draftOnlyMode = true;
+initialSettings.rolloutMode = "paused";
+initialSettings.killSwitch = { ...initialSettings.killSwitch, paused: true, reason: "Owner console milestone: production paused" };
+initialSettings.promotionProgress.autoPublishExplicitlyActivated = false;
+await saveSettings(db, initialSettings);
 const worker = new AutopilotWorker(db, config);
+worker.emergencyPause(true);
 worker.start();
 
 const app = express();
@@ -283,6 +294,11 @@ const requireAuth = createAuthMiddleware(config, db);
 
 app.use(apiLimiter);
 app.use(requireAuth);
+
+// Branch-native owner surface shares M5 authentication, CSRF and database.
+const ownerRouter = express.Router();
+mountOwnerConsole(ownerRouter, db, getCsrf, requireCsrf);
+app.use("/owner", ownerRouter);
 
 // ---- Overview ----
 app.get("/", async (req: AuthedRequest, res) => {
@@ -1121,6 +1137,8 @@ app.post("/articles/:id/regenerate", async (req: AuthedRequest, res) => {
 
 app.post("/articles/:id/publish", async (req: AuthedRequest, res) => {
   if (!requireCsrf(req, res)) return;
+  // Preserve the legacy M5 handler for later rollout, but block this branch.
+  if (OWNER_CONSOLE_PRODUCTION_PAUSED) return res.status(423).send("Publishing is paused on the owner-console branch.");
   const id = Number(req.params.id);
   const settings = await getSettings(db);
   const article = await getArticle(db, id);
@@ -1166,6 +1184,7 @@ app.post("/articles/:id/publish", async (req: AuthedRequest, res) => {
 
 app.post("/articles/:id/schedule", async (req: AuthedRequest, res) => {
   if (!requireCsrf(req, res)) return;
+  if (OWNER_CONSOLE_PRODUCTION_PAUSED) return res.status(423).send("Scheduling is paused on the owner-console branch.");
   const id = Number(req.params.id);
   const settings = await getSettings(db);
   const article = await getArticle(db, id);
@@ -1406,12 +1425,16 @@ app.post("/settings", async (req: AuthedRequest, res) => {
     }
   });
 
-  // Force safe production posture unless merchant explicitly chose AUTO_PUBLISH and unchecked draft-only.
-  if (next.rolloutMode !== "auto_publish") {
-    next.draftOnlyMode = true;
-    next.promotionProgress.autoPublishExplicitlyActivated = false;
-  }
+  // This branch is an owner-review milestone, not a production rollout.
+  // Preserve M5's existing policy functions but do not allow the legacy settings
+  // form to activate the worker or auto-publishing behind the console's back.
+  next.enabled = false;
+  next.draftOnlyMode = true;
+  next.rolloutMode = "paused";
+  next.killSwitch = { ...next.killSwitch, paused: true, reason: "Owner console milestone: production paused" };
+  next.promotionProgress.autoPublishExplicitlyActivated = false;
 
+  // This branch never enables automatic publishing.
   if (next.enabled && !next.killSwitch.paused) worker.emergencyPause(false);
   if (next.killSwitch.paused || next.rolloutMode === "paused") worker.emergencyPause(true);
   await saveSettings(db, next);
@@ -1508,6 +1531,7 @@ app.get("/api/products", async (req, res) => {
 
 app.post("/publish-now", async (req: AuthedRequest, res) => {
   if (!requireCsrf(req, res)) return;
+  if (OWNER_CONSOLE_PRODUCTION_PAUSED) return res.status(423).send("Publishing is paused on the owner-console branch.");
   await insertManualJob(db);
   void worker.tick();
   await recordAudit(db, { actor: actor(req), action: "publish_now_queued" });

@@ -78,6 +78,13 @@ export async function migrate(db: Db): Promise<void> {
       updated_at timestamptz NOT NULL DEFAULT now()
     )`);
 
+    // Separate drafting preferences; never feed these into rollout or publishing.
+    await client.query(`CREATE TABLE IF NOT EXISTS owner_console_preferences (
+      singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+      value jsonb NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    )`);
+
     await client.query(`CREATE TABLE IF NOT EXISTS publish_jobs (
       id bigserial PRIMARY KEY,
       slot_key text NOT NULL UNIQUE,
