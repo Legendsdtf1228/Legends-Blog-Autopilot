@@ -32,7 +32,7 @@ function config(owner?: string): AppConfig {
   };
 }
 
-function ownerResult(auth: AuthedRequest["auth"], owner = "admin") {
+function ownerResult(auth: AuthedRequest["auth"], owner?: string) {
   let status: number | undefined;
   let body: string | undefined;
   let nextCalled = false;
@@ -55,13 +55,13 @@ function ownerResult(auth: AuthedRequest["auth"], owner = "admin") {
 }
 
 test("owner authorization permits only the configured standalone cookie-session identity", () => {
-  assert.equal(ownerResult({ mode: "session", user: "admin" }).nextCalled, true);
+  assert.equal(ownerResult({ mode: "session", user: "admin" }, "admin").nextCalled, true);
   for (const auth of [
     { mode: "basic", user: "admin" },
     { mode: "shopify_session_token", user: "admin", shop: "example.myshopify.com" },
     { mode: "session", user: "other" }
   ] as AuthedRequest["auth"][]) {
-    assert.deepEqual(ownerResult(auth), {
+    assert.deepEqual(ownerResult(auth, "admin"), {
       status: 403,
       body: "Owner authorization required",
       nextCalled: false
@@ -70,8 +70,13 @@ test("owner authorization permits only the configured standalone cookie-session 
 });
 
 test("owner authorization fails closed when owner identity or authentication is missing", () => {
+  assert.deepEqual(ownerResult({ mode: "session", user: "admin" }, undefined), {
+    status: 403,
+    body: "Owner authorization required",
+    nextCalled: false
+  });
   assert.equal(ownerResult({ mode: "session", user: "admin" }, "").status, 403);
-  assert.equal(ownerResult(undefined).status, 403);
+  assert.equal(ownerResult(undefined, "admin").status, 403);
 });
 
 test("CSRF exception applies only to a Bearer token verified for the current request", () => {
