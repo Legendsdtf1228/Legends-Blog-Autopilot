@@ -37,14 +37,18 @@ async function preference(db: Db): Promise<Row> {
 
 export function mountOwnerConsole(router: Router, db: Db, csrf: (req: any) => string, checkCsrf: (req: any, res: any) => boolean): void {
   router.get("/", async (req, res) => {
-    const [clusters, packets, entries, briefs, settings] = await Promise.all([
+    const [clusters, questions, entries, briefs, settings] = await Promise.all([
       db.query<{ n: string }>("SELECT count(*)::text n FROM opportunity_clusters WHERE status IN ('active','needs_review')"),
-      db.query<{ n: string }>("SELECT count(*)::text n FROM merchant_interview_packets WHERE completion_status='open'"),
+      db.query<{ n: string }>(`SELECT count(*)::text n
+        FROM merchant_interview_questions q
+        JOIN merchant_interview_packets p ON p.id=q.packet_id
+        LEFT JOIN merchant_interview_answers a ON a.packet_id=q.packet_id AND a.question_id=q.id
+        WHERE p.completion_status IN ('open','answered_pending_approval') AND a.question_id IS NULL`),
       db.query<{ n: string }>("SELECT count(*)::text n FROM knowledge_entries WHERE approval_state='PENDING_APPROVAL'"),
       db.query<{ n: string }>("SELECT count(*)::text n FROM article_briefs"),
       getSettings(db)
     ]);
-    const counts = [["Pipeline briefs", briefs], ["Active research clusters", clusters], ["Questions needing an answer", packets], ["Pending knowledge entries", entries]];
+    const counts = [["Pipeline briefs", briefs], ["Active research clusters", clusters], ["Questions needing an answer", questions], ["Pending knowledge entries", entries]];
     res.send(shell("Owner overview", `<div class="grid">${counts.map(([label, result]) => panel(str(label), `<strong class="count">${esc((result as { rows: { n: string }[] }).rows[0]?.n ?? "0")}</strong>`)).join("")}</div>
       ${panel("Next safe action", `<p>Review source evidence and owner scope before moving a draft forward.</p><p>Authoritative M5 rollout: ${badge(settings.rolloutMode)} · console mode: ${badge("draft_only")} · publishing: ${badge("disabled")}</p><a class="button" href="/owner/pipeline">Open pipeline →</a>`)}`, csrf(req)));
   });
@@ -97,20 +101,26 @@ export function mountOwnerConsole(router: Router, db: Db, csrf: (req: any) => st
   });
 
   router.get("/questions", async (req, res) => {
-    const { rows } = await db.query<Row>(`SELECT q.id,q.prompt,q.payload,p.completion_status,p.payload packet
+    const { rows } = await db.query<Row>(`SELECT q.id,q.prompt,q.payload,p.completion_status,p.payload packet,
+      a.answer_text,a.approval_state AS answer_state
       FROM merchant_interview_questions q JOIN merchant_interview_packets p ON p.id=q.packet_id
+      LEFT JOIN merchant_interview_answers a ON a.packet_id=q.packet_id AND a.question_id=q.id
       WHERE p.completion_status IN ('open','answered_pending_approval')
       ORDER BY p.updated_at DESC,q.created_at LIMIT 200`);
-    const cards = rows.map(r => panel(str(r.prompt), `<p>Required scope: ${esc(obj(r.payload).requiredScope || "Product, geography and effective date")}</p>
-      <p>Impacted clusters: ${esc(arr(obj(r.packet).affectedClusterIds).join(", ") || "Not specified")}</p>
-      <p>State: ${badge(r.completion_status === "open" ? "awaiting answer" : "answer pending review")}</p>
-      ${r.completion_status === "open" ? `<form method="post" action="/owner/questions/${link(r.id)}/answer"><input type="hidden" name="_csrf" value="${esc(csrf(req))}">
+    const cards = rows.map(r => {
+      const answered = r.answer_state != null || r.answer_text != null;
+      const status = answered ? "answer " + str(r.answer_state || "pending review").toLowerCase() : "awaiting answer";
+      return panel(str(r.prompt), `<p>Required scope: ${esc(obj(r.payload).requiredScope || "Product, geography and effective date")}</p>
+        <p>Impacted clusters: ${esc(arr(obj(r.packet).affectedClusterIds).join(", ") || "Not specified")}</p>
+        <p>State: ${badge(status)}</p>
+        ${answered ? `<p>Answer on file: ${esc(r.answer_text)}</p>` : `<form method="post" action="/owner/questions/${link(r.id)}/answer"><input type="hidden" name="_csrf" value="${esc(csrf(req))}">
         <label>Answer<textarea name="answer" required maxlength="4000"></textarea></label>
         <label>Scope<input name="scope" required maxlength="500" placeholder="Product, audience, region, exclusions"></label>
         <label>Effective date<input type="date" name="effectiveDate" required></label>
         <label><input type="checkbox" name="publicUsePermission"> Permission for possible future public use (does not approve the claim)</label>
-        <button type="submit">Save pending answer</button></form>` : ""}`)).join("");
-    res.send(shell("Merchant questions", cards || empty("No open M5 interview questions."), csrf(req)));
+        <button type="submit">Save pending answer</button></form>`}`);
+    }).join("");
+    res.send(shell("Merchant questions", cards || empty("No M5 interview questions."), csrf(req)));
   });
 
   router.post("/questions/:id/answer", async (req, res) => {
@@ -119,21 +129,49 @@ export function mountOwnerConsole(router: Router, db: Db, csrf: (req: any) => st
     if (!answer || answer.length > 4000 || !scope || scope.length > 500 || !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
       Number.isNaN(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date)
       return res.status(400).send(shell("Invalid answer", empty("Answer, scope and a valid effective date are required."), csrf(req)));
-    const { rows } = await db.query<{ packet_id: string; knowledge_class: KnowledgeClass; completion_status: string }>(
-        `SELECT p.id packet_id,p.knowledge_class,p.completion_status FROM merchant_interview_questions q
-         JOIN merchant_interview_packets p ON p.id=q.packet_id WHERE q.id=$1`, [req.params.id]);
-    const item = rows[0];
-    if (!item || item.completion_status !== "open")
-      return res.status(item ? 409 : 404).send(shell("Question unavailable", empty("This question is not awaiting an answer."), csrf(req)));
-    // Use M5's canonical pending-knowledge path; never set approval or public-use flags here.
-    await submitInterviewAnswerAsPendingKnowledge(db, {
-        packetId: item.packet_id, questionId: req.params.id, answerText: answer,
-        knowledgeClass: item.knowledge_class, sourceReference: `merchant-interview:${item.packet_id}:${req.params.id}`,
+
+    // Serialize submissions for this question while M5's pending-only writer persists the answer.
+    const lock = await db.connect();
+    const lockKey = `owner-console-answer:${str(req.params.id)}`;
+    try {
+      await lock.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
+      const { rows } = await db.query<{
+        packet_id: string;
+        knowledge_class: KnowledgeClass;
+        completion_status: string;
+        answered_question_id: string | null;
+      }>(
+        `SELECT p.id packet_id,p.knowledge_class,p.completion_status,a.question_id AS answered_question_id
+         FROM merchant_interview_questions q
+         JOIN merchant_interview_packets p ON p.id=q.packet_id
+         LEFT JOIN merchant_interview_answers a ON a.packet_id=q.packet_id AND a.question_id=q.id
+         WHERE q.id=$1`,
+        [req.params.id],
+      );
+      const item = rows[0];
+      if (!item) return res.status(404).send(shell("Question unavailable", empty("No M5 question has that identifier."), csrf(req)));
+      if (!["open", "answered_pending_approval"].includes(item.completion_status) || item.answered_question_id)
+        return res.status(409).send(shell("Question unavailable", empty("This question has already been answered or is not awaiting an answer."), csrf(req)));
+
+      // M5's writer fixes approval to PENDING_APPROVAL and public usage to false.
+      await submitInterviewAnswerAsPendingKnowledge(db, {
+        packetId: item.packet_id,
+        questionId: str(req.params.id),
+        answerText: answer,
+        knowledgeClass: item.knowledge_class,
+        sourceReference: `merchant-interview:${item.packet_id}:${str(req.params.id)}`,
         actor: `owner-console:${(req as AuthedRequest).auth?.user || "merchant"}`,
-        scope: { applicableNotes: `${scope}; effective date: ${date}; public-use permission requested: ${Boolean(req.body.publicUsePermission)}` }
-    });
-    await recordAudit(db, { actor: (req as AuthedRequest).auth?.user || "merchant", action: "owner_answer_pending_review", detail: { questionId: req.params.id } });
-    res.redirect(303, "/owner/questions");
+        scope: { applicableNotes: `${scope}; effective date: ${date}; public-use permission requested: ${Boolean(req.body.publicUsePermission)}` },
+      });
+      await recordAudit(db, { actor: (req as AuthedRequest).auth?.user || "merchant", action: "owner_answer_pending_review", detail: { questionId: str(req.params.id) } });
+      return res.redirect(303, "/owner/questions");
+    } finally {
+      try {
+        await lock.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [lockKey]).catch(() => undefined);
+      } finally {
+        lock.release();
+      }
+    }
   });
 
   router.get("/calendar", async (req, res) => {
