@@ -1,0 +1,697 @@
+/**
+ * Source authority, scope match, and contradiction precedence (M4).
+ */
+import type {
+  ClaimClass,
+  GeographicKnowledgeScope,
+  KnowledgeEntry,
+  KnowledgeSourceType,
+  ProcessSurfaceScope
+} from "./knowledgeRegistry.js";
+import { sourceTypeCanSatisfyClaims } from "./knowledgeRegistry.js";
+
+/** Higher = more authoritative for conflict resolution. */
+export function sourceAuthorityRank(sourceType: KnowledgeSourceType): number {
+  switch (sourceType) {
+    case "public_government_standards":
+      return 100;
+    case "manufacturer_documentation":
+      return 90;
+    case "authoritative_technical_source":
+      return 80;
+    case "approved_business_fact_or_policy":
+      return 70;
+    case "approved_merchant_firsthand":
+      return 65;
+    case "active_first_party_customer_evidence":
+      return 60;
+    case "inferred_seed":
+      return 10;
+    case "model_inference":
+      return 5;
+    case "template_example":
+      return 3;
+    case "unsupported_assertion":
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+export function processSurfacesCompatible(
+  knowledgeSurface: ProcessSurfaceScope,
+  claimSurface: ProcessSurfaceScope
+): boolean {
+  // Specific process knowledge may support a general/unspecified claim surface.
+  // Specific claims require matching (or general) knowledge — never cross UV vs apparel.
+  if (knowledgeSurface === "uv_dtf_hard_surface" && claimSurface === "apparel_dtf") return false;
+  if (knowledgeSurface === "apparel_dtf" && claimSurface === "uv_dtf_hard_surface") return false;
+  if (knowledgeSurface === "embroidery" && (claimSurface === "apparel_dtf" || claimSurface === "uv_dtf_hard_surface")) {
+    return false;
+  }
+  if (claimSurface === "unspecified" || claimSurface === "general") return true;
+  if (knowledgeSurface === "unspecified") return false;
+  if (knowledgeSurface === "general") return true;
+  return knowledgeSurface === claimSurface;
+}
+
+export function geographyCompatible(
+  knowledgeGeo: GeographicKnowledgeScope,
+  claimGeo: GeographicKnowledgeScope
+): { ok: boolean; reason?: string } {
+  if (claimGeo === "local") {
+    if (knowledgeGeo === "local") return { ok: true };
+    if (knowledgeGeo === "national" || knowledgeGeo === "global") {
+      return { ok: false, reason: "national/global facts do not satisfy local claims without local evidence" };
+    }
+    return { ok: false, reason: "unspecified geography cannot satisfy local claims" };
+  }
+  if (knowledgeGeo === "local") {
+    return { ok: false, reason: "local facts must not be promoted to national/global/unspecified claims" };
+  }
+  return { ok: true };
+}
+
+export function claimClassAllowsSource(
+  claimClass: ClaimClass,
+  entry: Pick<KnowledgeEntry, "sourceType" | "firsthand" | "publicUsageAllowed" | "exactApprovedFact">
+): { ok: boolean; reason?: string; observationOnly?: boolean } {
+  if (!sourceTypeCanSatisfyClaims(entry.sourceType)) {
+    return { ok: false, reason: `${entry.sourceType} cannot satisfy claims` };
+  }
+
+  switch (claimClass) {
+    case "merchant_experience":
+      if (entry.sourceType !== "approved_merchant_firsthand" || entry.firsthand !== true) {
+        return { ok: false, reason: "firsthand merchant claims require approved_merchant_firsthand" };
+      }
+      return { ok: true };
+    case "customer_result":
+      if (
+        entry.sourceType !== "active_first_party_customer_evidence" &&
+        entry.sourceType !== "approved_merchant_firsthand"
+      ) {
+        return { ok: false, reason: "customer-result claims require approved customer or firsthand evidence" };
+      }
+      if (entry.publicUsageAllowed !== true) {
+        return { ok: false, reason: "customer-result claims require public usage permission" };
+      }
+      return { ok: true };
+    case "price_cost":
+    case "turnaround":
+    case "merchant_policy":
+    case "time_sensitive":
+      if (
+        entry.sourceType !== "approved_business_fact_or_policy" &&
+        entry.sourceType !== "approved_merchant_firsthand" &&
+        entry.sourceType !== "manufacturer_documentation" &&
+        entry.sourceType !== "authoritative_technical_source"
+      ) {
+        return { ok: false, reason: `${claimClass} requires approved business/policy or authoritative pricing source` };
+      }
+      return { ok: true };
+    case "technical":
+      // Approval is not technical authority — only authoritative/manufacturer/standards sources.
+      if (
+        entry.sourceType === "authoritative_technical_source" ||
+        entry.sourceType === "manufacturer_documentation" ||
+        entry.sourceType === "public_government_standards"
+      ) {
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        reason:
+          "technical specifications require manufacturer documentation, authoritative technical sources, or government/standards sources"
+      };
+    case "safety_compliance":
+      if (
+        entry.sourceType === "authoritative_technical_source" ||
+        entry.sourceType === "manufacturer_documentation" ||
+        entry.sourceType === "public_government_standards"
+      ) {
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        reason:
+          "safety/compliance claims require authoritative or government/standards support; shop policy/approval is not safety authority"
+      };
+    case "product_behavior":
+      if (
+        entry.sourceType === "authoritative_technical_source" ||
+        entry.sourceType === "manufacturer_documentation" ||
+        entry.sourceType === "public_government_standards"
+      ) {
+        return { ok: true };
+      }
+      if (entry.sourceType === "approved_merchant_firsthand" && entry.firsthand === true) {
+        // Merchant observations may qualify product behavior only as scoped observations — not general technical fact.
+        return {
+          ok: true,
+          observationOnly: true,
+          reason: "merchant observation may qualify product behavior only when scoped as observation"
+        };
+      }
+      return {
+        ok: false,
+        reason: "product-behavior claims require authoritative support or scoped merchant observation"
+      };
+    case "local_claim":
+      return { ok: true };
+    case "comparison_recommendation":
+    case "general_educational":
+      return { ok: true };
+    default:
+      return { ok: true };
+  }
+}
+
+/** True when a claim class requires explicit freshness metadata (not approval date alone). */
+export function claimRequiresExplicitFreshness(claimClass: ClaimClass): boolean {
+  return (
+    claimClass === "price_cost" ||
+    claimClass === "turnaround" ||
+    claimClass === "merchant_policy" ||
+    claimClass === "time_sensitive"
+  );
+}
+
+export type FreshnessAssessmentStatus = "fresh" | "aging" | "stale" | "unknown" | "not_yet_effective";
+
+export interface FreshnessAssessment {
+  status: FreshnessAssessmentStatus;
+  reason: string;
+}
+
+/**
+ * Assess freshness. For time-sensitive claims, approval date alone never establishes indefinite freshness.
+ * Requires applicable effectiveFrom/checked date plus a freshness window or effectiveTo expiration.
+ */
+export function assessKnowledgeFreshness(
+  entry: Pick<
+    KnowledgeEntry,
+    "approvalState" | "effectiveFrom" | "effectiveTo" | "freshnessPolicyDays" | "approvedAt"
+  >,
+  now: Date,
+  opts: { timeSensitive: boolean }
+): FreshnessAssessment {
+  if (entry.approvalState === "STALE") {
+    return { status: "stale", reason: "approvalState is STALE" };
+  }
+
+  const fromMs = entry.effectiveFrom ? Date.parse(entry.effectiveFrom) : NaN;
+  const toMs = entry.effectiveTo ? Date.parse(entry.effectiveTo) : NaN;
+  const hasFrom = !Number.isNaN(fromMs);
+  const hasTo = !Number.isNaN(toMs);
+  const hasWindow = entry.freshnessPolicyDays != null && Number.isFinite(entry.freshnessPolicyDays);
+
+  if (opts.timeSensitive) {
+    if (!hasFrom) {
+      return {
+        status: "unknown",
+        reason: "time-sensitive fact missing effectiveFrom/checked date; remains UNKNOWN"
+      };
+    }
+    if (!hasTo && !hasWindow) {
+      return {
+        status: "unknown",
+        reason: "time-sensitive fact missing freshness window or effectiveTo; approval date alone is insufficient"
+      };
+    }
+    if (fromMs > now.getTime()) {
+      return { status: "not_yet_effective", reason: "effectiveFrom is in the future; not currently usable" };
+    }
+    if (hasTo && toMs < now.getTime()) {
+      return { status: "stale", reason: "effectiveTo expired" };
+    }
+    if (hasWindow) {
+      const ageDays = (now.getTime() - fromMs) / 86400000;
+      if (ageDays > (entry.freshnessPolicyDays as number)) {
+        return { status: "stale", reason: "freshness window exceeded from effectiveFrom" };
+      }
+      if (ageDays > (entry.freshnessPolicyDays as number) * 0.7) {
+        return { status: "aging", reason: "within freshness window but aging" };
+      }
+    }
+    return { status: "fresh", reason: "within explicit freshness metadata" };
+  }
+
+  // Timeless / non-time-sensitive knowledge may remain usable without a price-style freshness window.
+  if (hasTo && toMs < now.getTime()) {
+    return { status: "stale", reason: "effectiveTo expired" };
+  }
+  if (hasFrom && fromMs > now.getTime()) {
+    return { status: "not_yet_effective", reason: "effectiveFrom is in the future" };
+  }
+  if (hasWindow && hasFrom) {
+    const ageDays = (now.getTime() - fromMs) / 86400000;
+    if (ageDays > (entry.freshnessPolicyDays as number)) {
+      return { status: "stale", reason: "optional freshness window exceeded" };
+    }
+    if (ageDays > (entry.freshnessPolicyDays as number) * 0.7) {
+      return { status: "aging", reason: "within optional freshness window but aging" };
+    }
+    return { status: "fresh", reason: "within optional freshness window" };
+  }
+  return {
+    status: "fresh",
+    reason: "timeless knowledge; no price-style freshness window required"
+  };
+}
+
+/** Detect observation-scoped merchant wording (not a general technical assertion). */
+export function isObservationScopedFact(text: string): boolean {
+  return /\b(in our shop|at our shop|we observe|we have observed|our experience|our production|we saw|firsthand)\b/i.test(
+    text
+  );
+}
+
+export interface ContradictionRecord {
+  leftEntryId: string;
+  rightEntryId: string;
+  leftRevisionId: string;
+  rightRevisionId: string;
+  reasons: string[];
+  /** Winner entry id when precedence resolves; null if unresolved material conflict. */
+  winnerEntryId: string | null;
+  unresolved: boolean;
+}
+
+function approvalRank(state: KnowledgeEntry["approvalState"]): number {
+  return state === "APPROVED" ? 10 : 0;
+}
+
+function effectiveDateMs(entry: KnowledgeEntry): number {
+  if (entry.effectiveFrom) {
+    const t = Date.parse(entry.effectiveFrom);
+    if (!Number.isNaN(t)) return t;
+  }
+  if (entry.approvedAt) {
+    const t = Date.parse(entry.approvedAt);
+    if (!Number.isNaN(t)) return t;
+  }
+  return 0;
+}
+
+function confidenceRank(c: KnowledgeEntry["confidence"]): number {
+  switch (c) {
+    case "high":
+      return 3;
+    case "medium":
+      return 2;
+    case "low":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Deterministic precedence: authority → approval → scope match score → effective date → revision → confidence.
+ * Does not silently prefer the source that makes writing easier.
+ */
+export function resolveKnowledgePrecedence(
+  left: KnowledgeEntry,
+  right: KnowledgeEntry,
+  scopeMatchLeft: number,
+  scopeMatchRight: number
+): { winner: KnowledgeEntry | null; reasons: string[] } {
+  const reasons: string[] = [];
+  const pairs: Array<[string, number, number]> = [
+    ["authority", sourceAuthorityRank(left.sourceType), sourceAuthorityRank(right.sourceType)],
+    ["approval", approvalRank(left.approvalState), approvalRank(right.approvalState)],
+    ["scopeMatch", scopeMatchLeft, scopeMatchRight],
+    ["effectiveDate", effectiveDateMs(left), effectiveDateMs(right)],
+    ["revision", left.revisionId.localeCompare(right.revisionId), 0], // placeholder replaced below
+    ["confidence", confidenceRank(left.confidence), confidenceRank(right.confidence)]
+  ];
+  // revision: prefer lexicographically greater revision id only as last-resort tie-break after content age
+  pairs[4] = ["revision", left.revisionId < right.revisionId ? 0 : 1, left.revisionId < right.revisionId ? 1 : 0];
+
+  for (const [label, a, b] of pairs) {
+    if (a > b) {
+      reasons.push(`${label}: prefer ${left.id}`);
+      return { winner: left, reasons };
+    }
+    if (b > a) {
+      reasons.push(`${label}: prefer ${right.id}`);
+      return { winner: right, reasons };
+    }
+  }
+  reasons.push("equal precedence; material contradiction unresolved");
+  return { winner: null, reasons };
+}
+
+/** Detect factual disagreement between two facts on the same normalized claim family. */
+export function factsContradict(leftFact: string, rightFact: string): boolean {
+  const a = leftFact.trim().toLowerCase();
+  const b = rightFact.trim().toLowerCase();
+  if (!a || !b || a === b) return false;
+
+  // Opposite polarity cues
+  const neg = /\b(not|never|no|cannot|can't|won't|does not|do not)\b/;
+  if (neg.test(a) !== neg.test(b) && shareClaimTokens(a, b)) return true;
+
+  // Numeric disagreement when both state numbers for similar units
+  const numsA = a.match(/\$?\d+(?:\.\d+)?/g) || [];
+  const numsB = b.match(/\$?\d+(?:\.\d+)?/g) || [];
+  if (numsA.length && numsB.length && shareClaimTokens(a, b)) {
+    const setA = new Set(numsA.map(n => n.replace("$", "")));
+    const setB = new Set(numsB.map(n => n.replace("$", "")));
+    const overlap = [...setA].some(n => setB.has(n));
+    if (!overlap) return true;
+  }
+
+  // Process surface clash markers
+  const uv = /\buv\s*dtf\b|\bhard[- ]surface\b/;
+  const apparel = /\bapparel\s*dtf\b|\bgarment\b|\bt-?shirt\b/;
+  if ((uv.test(a) && apparel.test(b)) || (apparel.test(a) && uv.test(b))) return true;
+
+  // Direct local vs national framing
+  if (
+    (/\blocal\b|\bwarner robins\b|\bmiddle georgia\b/.test(a) && /\bnational\b|\bus[- ]wide\b/.test(b)) ||
+    (/\blocal\b|\bwarner robins\b|\bmiddle georgia\b/.test(b) && /\bnational\b|\bus[- ]wide\b/.test(a))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function shareClaimTokens(a: string, b: string): boolean {
+  const tok = (s: string) =>
+    new Set(
+      s
+        .split(/[^a-z0-9]+/)
+        .filter(t => t.length > 3 && !STOP.has(t))
+    );
+  const A = tok(a);
+  const B = tok(b);
+  let shared = 0;
+  for (const t of A) if (B.has(t)) shared++;
+  return shared >= 2;
+}
+
+const STOP = new Set([
+  "that",
+  "this",
+  "with",
+  "from",
+  "have",
+  "will",
+  "your",
+  "their",
+  "about",
+  "into",
+  "for",
+  "and",
+  "the",
+  "are",
+  "was",
+  "were"
+]);
+
+export function claimRelevanceScore(
+  claimText: string,
+  entry: Pick<KnowledgeEntry, "normalizedClaim" | "exactApprovedFact" | "knowledgeClass">,
+  contextText = ""
+): number {
+  const claim = `${claimText} ${contextText}`.toLowerCase();
+  const fact = `${entry.normalizedClaim} ${entry.exactApprovedFact}`.toLowerCase();
+  const claimTokens = [...new Set(claim.split(/[^a-z0-9]+/).filter(t => t.length > 3 && !STOP.has(t)))];
+  if (!claimTokens.length) return 0;
+  let hits = 0;
+  for (const t of claimTokens) {
+    if (fact.includes(t)) hits++;
+  }
+  const ratio = hits / claimTokens.length;
+  // Also measure how much of the fact is grounded in the claim/context (prevents one-token stretch).
+  const factTokens = [...new Set(fact.split(/[^a-z0-9]+/).filter(t => t.length > 3 && !STOP.has(t)))];
+  let factHits = 0;
+  for (const t of factTokens) {
+    if (claim.includes(t)) factHits++;
+  }
+  const factRatio = factTokens.length ? factHits / factTokens.length : 0;
+  const score = Math.max(ratio, factRatio);
+  // Require meaningful overlap — keyword sprinkle must not attach irrelevant knowledge.
+  if (hits < 2 && factHits < 2 && score < 0.28) return 0;
+  if (score < 0.22) return 0;
+  return score;
+}
+
+/** Knowledge classes that may satisfy a claim class when scope also matches. */
+export function knowledgeClassAligns(claimClass: ClaimClass, knowledgeClass: KnowledgeEntry["knowledgeClass"]): boolean {
+  switch (claimClass) {
+    case "price_cost":
+      return knowledgeClass === "pricing_cost_facts" || knowledgeClass === "equipment_startup_costs";
+    case "turnaround":
+    case "merchant_policy":
+      return (
+        knowledgeClass === "fulfillment_turnaround" ||
+        knowledgeClass === "legends_policies" ||
+        knowledgeClass === "dtf_shop_operations"
+      );
+    case "merchant_experience":
+    case "customer_result":
+      return knowledgeClass === "print_shop_growth_lessons" || knowledgeClass === "dtf_shop_operations";
+    case "local_claim":
+      return knowledgeClass === "local_customer_needs";
+    case "technical":
+    case "product_behavior":
+      return (
+        knowledgeClass === "technical_specifications" ||
+        knowledgeClass === "artwork_preparation_failures" ||
+        knowledgeClass === "garment_selection" ||
+        knowledgeClass === "uv_dtf_vs_apparel_dtf"
+      );
+    case "safety_compliance":
+      // Include policy/ops classes so non-authoritative sources can be considered and explicitly rejected.
+      return (
+        knowledgeClass === "technical_specifications" ||
+        knowledgeClass === "artwork_preparation_failures" ||
+        knowledgeClass === "legends_policies" ||
+        knowledgeClass === "dtf_shop_operations" ||
+        knowledgeClass === "uv_dtf_vs_apparel_dtf"
+      );
+    case "comparison_recommendation":
+      return (
+        knowledgeClass === "garment_selection" ||
+        knowledgeClass === "embroidery_vs_dtf" ||
+        knowledgeClass === "uv_dtf_vs_apparel_dtf" ||
+        knowledgeClass === "general_authoritative_education"
+      );
+    case "general_educational":
+      return true;
+    case "time_sensitive":
+      return knowledgeClass === "pricing_cost_facts" || knowledgeClass === "legends_policies" || knowledgeClass === "fulfillment_turnaround";
+    default:
+      return false;
+  }
+}
+
+export function hasUsableNumericEvidence(text: string): boolean {
+  return /\$?\d+(?:\.\d+)?/.test(text);
+}
+
+/**
+ * Explicit SourceEvidence source-type catalog for attachment policy.
+ * Unknown / misspelled / future types fail closed until an explicit allowlist update.
+ */
+export const SOURCE_EVIDENCE_ATTACHMENT_TYPES = [
+  "approved_merchant_firsthand",
+  "approved_business_fact_or_policy",
+  "active_first_party_customer_evidence",
+  "authoritative_technical_source",
+  "manufacturer_documentation",
+  "public_government_standards"
+] as const;
+
+export type SourceEvidenceAttachmentType = (typeof SOURCE_EVIDENCE_ATTACHMENT_TYPES)[number];
+
+const SOURCE_EVIDENCE_ATTACHMENT_TYPE_SET = new Set<string>(SOURCE_EVIDENCE_ATTACHMENT_TYPES);
+
+export function isKnownSourceEvidenceAttachmentType(sourceType: string): sourceType is SourceEvidenceAttachmentType {
+  return SOURCE_EVIDENCE_ATTACHMENT_TYPE_SET.has(sourceType);
+}
+
+/**
+ * Claim-aware allowlist for SourceEvidence attachment.
+ * Not present here ⇒ cannot attach. Extending requires an explicit policy decision in this function.
+ */
+export function allowedSourceTypesForClaimAttachment(claimClass: ClaimClass): ReadonlySet<SourceEvidenceAttachmentType> {
+  switch (claimClass) {
+    case "technical":
+    case "safety_compliance":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards"
+      ]);
+    case "product_behavior":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards",
+        "approved_merchant_firsthand"
+      ]);
+    case "price_cost":
+    case "turnaround":
+    case "merchant_policy":
+    case "time_sensitive":
+      return new Set([
+        "approved_business_fact_or_policy",
+        "approved_merchant_firsthand",
+        "manufacturer_documentation",
+        "authoritative_technical_source"
+      ]);
+    case "merchant_experience":
+      return new Set(["approved_merchant_firsthand"]);
+    case "customer_result":
+      return new Set(["active_first_party_customer_evidence", "approved_merchant_firsthand"]);
+    case "local_claim":
+      return new Set([
+        "approved_business_fact_or_policy",
+        "approved_merchant_firsthand",
+        "active_first_party_customer_evidence",
+        "authoritative_technical_source"
+      ]);
+    case "comparison_recommendation":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards",
+        "approved_merchant_firsthand",
+        "approved_business_fact_or_policy"
+      ]);
+    case "general_educational":
+      return new Set([
+        "authoritative_technical_source",
+        "manufacturer_documentation",
+        "public_government_standards",
+        "approved_business_fact_or_policy",
+        "approved_merchant_firsthand",
+        "active_first_party_customer_evidence"
+      ]);
+    default:
+      // Unknown claim classes fail closed.
+      return new Set();
+  }
+}
+
+export function claimRequiresExplicitProcessScope(
+  claimClass: ClaimClass,
+  claimSurface: ProcessSurfaceScope
+): boolean {
+  if (
+    claimClass === "technical" ||
+    claimClass === "safety_compliance" ||
+    claimClass === "product_behavior" ||
+    claimClass === "comparison_recommendation"
+  ) {
+    return true;
+  }
+  return (
+    claimSurface === "apparel_dtf" ||
+    claimSurface === "uv_dtf_hard_surface" ||
+    claimSurface === "embroidery"
+  );
+}
+
+export function claimRequiresExplicitGeographicScope(
+  claimClass: ClaimClass,
+  claimGeo: GeographicKnowledgeScope
+): boolean {
+  if (claimClass === "local_claim") return true;
+  return claimGeo === "local" || claimGeo === "national";
+}
+
+/**
+ * Strict process-scope gate for SourceEvidence attachment (missing scope fails closed when required).
+ */
+export function sourceEvidenceProcessScopeAllows(
+  evidenceSurface: ProcessSurfaceScope | undefined | null,
+  claimSurface: ProcessSurfaceScope,
+  claimClass: ClaimClass
+): { ok: boolean; reason: string } {
+  const required = claimRequiresExplicitProcessScope(claimClass, claimSurface);
+  const specificClaim =
+    claimSurface === "apparel_dtf" ||
+    claimSurface === "uv_dtf_hard_surface" ||
+    claimSurface === "embroidery";
+
+  if (required) {
+    if (evidenceSurface == null) {
+      return { ok: false, reason: "missing required processSurface for scope-sensitive claim" };
+    }
+    if (evidenceSurface === "unspecified") {
+      return {
+        ok: false,
+        reason: "unspecified processSurface cannot satisfy a specific apparel, UV DTF, or embroidery claim"
+      };
+    }
+    if (specificClaim) {
+      if (evidenceSurface === "general") {
+        return {
+          ok: false,
+          reason: "general process scope cannot satisfy a specific apparel/UV DTF/embroidery claim"
+        };
+      }
+      if (evidenceSurface !== claimSurface) {
+        return { ok: false, reason: `process surface mismatch (${evidenceSurface} vs ${claimSurface})` };
+      }
+      return { ok: true, reason: "process scope matches" };
+    }
+    // Claim is process-independent (general/unspecified): explicit general is valid; specific also OK.
+    if (evidenceSurface === "general" || evidenceSurface === "apparel_dtf" || evidenceSurface === "uv_dtf_hard_surface" || evidenceSurface === "embroidery") {
+      return { ok: true, reason: "process scope acceptable for process-independent claim" };
+    }
+    return { ok: false, reason: `unsupported processSurface ${evidenceSurface}` };
+  }
+
+  // Not required — if present, still must not hard-conflict.
+  if (evidenceSurface != null) {
+    if (specificClaim && evidenceSurface === "unspecified") {
+      return {
+        ok: false,
+        reason: "unspecified processSurface cannot satisfy a specific process claim"
+      };
+    }
+    if (!processSurfacesCompatible(evidenceSurface, claimSurface)) {
+      return { ok: false, reason: "process surface mismatch" };
+    }
+  }
+  return { ok: true, reason: "process scope not required or compatible" };
+}
+
+/**
+ * Strict geography gate for SourceEvidence attachment (missing scope fails closed when required).
+ */
+export function sourceEvidenceGeographicScopeAllows(
+  evidenceGeo: GeographicKnowledgeScope | undefined | null,
+  claimGeo: GeographicKnowledgeScope,
+  claimClass: ClaimClass
+): { ok: boolean; reason: string } {
+  const required = claimRequiresExplicitGeographicScope(claimClass, claimGeo);
+
+  if (required) {
+    if (evidenceGeo == null) {
+      return { ok: false, reason: "missing required geographicScope for geography-sensitive claim" };
+    }
+    if (evidenceGeo === "unspecified") {
+      return {
+        ok: false,
+        reason: "unspecified geographicScope cannot satisfy a local or national claim"
+      };
+    }
+    const geo = geographyCompatible(evidenceGeo, claimGeo);
+    if (!geo.ok) return { ok: false, reason: geo.reason || "geographic scope mismatch" };
+    return { ok: true, reason: "geographic scope matches" };
+  }
+
+  if (evidenceGeo != null) {
+    const geo = geographyCompatible(evidenceGeo, claimGeo);
+    if (!geo.ok) return { ok: false, reason: geo.reason || "geographic scope mismatch" };
+  }
+  return { ok: true, reason: "geographic scope not required or compatible" };
+}
