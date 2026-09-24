@@ -1,0 +1,52 @@
+M5 SECURITY CORRECTION — NEW REVISION
+
+Preserve accepted baseline:
+33995a82c48114c064285cdc9329a8ebe4ff9d45
+
+Create a separate security-correction revision. Do not rewrite the accepted checkpoint.
+
+1. OWNER AUTHORIZATION
+Implement a server-side owner authorization guard before the /owner/ router.
+
+Initially permit only an explicitly configured standalone administrator identity. Do not authorize Shopify staff sessions, ordinary authenticated users, or legacy Basic credentials merely because they passed global authentication.
+
+Verify the owner's authenticated identity on the server. Fail closed if owner identity or configuration is missing. Protect all /owner/ pages, reads, and writes.
+
+Do not hardcode credentials or introduce an owner bypass.
+
+2. CSRF CORRECTION
+Permit the CSRF exception only when a Bearer token was successfully verified for the CURRENT request.
+
+Require valid CSRF protection for:
+- Standalone cookie sessions
+- Shopify-derived cookie sessions
+- Basic-authenticated writes
+- Invalid-Bearer requests that fall back to cookies
+
+Add positive and negative regression tests.
+
+3. LEGACY INTERVIEW APPROVAL
+Keep the older interview/brief-approval route inaccessible to non-owner users. For this release, disable the legacy approval operation unless preserving it is demonstrably necessary and explicitly approved.
+
+Do not confuse legacy merchant_knowledge approval with canonical knowledge_entries approval.
+
+Keep canonical approval endpoints unexposed.
+
+4. PRESERVE SAFETY SETTINGS
+Automatic publishing remains disabled.
+Worker remains paused.
+Manual publishing and scheduling remain blocked.
+New owner answers remain PENDING_APPROVAL with publicUsageAllowed=false.
+
+5. VERIFICATION
+Run the full TypeScript check, complete test suite, production build, migration checks, authorization regression tests and CSRF regression tests.
+
+Verify both allowed and denied access paths. Confirm that normal authentication cannot bypass owner authorization.
+
+Run everything using an isolated environment and disposable database.
+
+Record exact test results and changes relative to the accepted baseline.
+
+Do not access production, change production secrets, merge into main, enable publishing or deploy.
+
+Return the security-correction commit SHA and complete verification report. STOP.
