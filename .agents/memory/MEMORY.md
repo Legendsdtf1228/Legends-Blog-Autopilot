@@ -1,0 +1,1 @@
+- [Local PostgreSQL test lifetime](local-postgres-lifetime.md) — keep disposable database servers in managed background shells.
