@@ -7,16 +7,29 @@
 
 This package prepares a **read-only** production inspection. It does **not** authorize migration, deploy, merge, or secret disclosure.
 
-## What the script reports
+## What the script reports (aggregate / schema only)
 
 | Section | Output |
 | --- | --- |
-| Session guards | `transaction_read_only`, isolation, 15s `statement_timeout`, database identity |
+| Session guards | `transaction_read_only`, isolation, 15s `statement_timeout`, database/role/host identity |
 | Installed migrations | `schema_migrations.id` + `applied_at` |
 | Missing / unexpected | Diff vs candidate expected IDs `001`–`011` |
-| Migration 007 impact | Aggregate duplicate `rollout_draft_counted` counts; rows the DELETE would remove; per-`article_id` duplicate tallies (ids + counts only) |
-| Legacy backfill impact | Exact INSERT/UPDATE estimates using migrate predicates, plus null JSON handle/title breakdowns |
-| Schema metadata | Presence of 007–011 tables/indexes; `source_evidence` approval columns; selected constraints |
+| Migration 007 impact | **Aggregates only:** `duplicate_group_count`, `rows_007_delete_would_remove` (`SUM(n - 1)`), `max_duplicate_group_size`, `duplicates_exist`, plus total counted-row tallies |
+| Legacy backfill impact | Exact INSERT/UPDATE **counts** using migrate predicates, plus null JSON handle/title **counts** (no job ids, titles, handles, or Shopify ids) |
+| Schema metadata | Catalog names for tables/indexes/columns/constraints relevant to 007–011 |
+
+**Not reported:** application `article_id` values, publish-job ids/slot keys, titles, handles, Shopify article ids, interview/knowledge content, or any other per-row application identifiers.
+
+## Migration 007 aggregate fields
+
+Detection matches migrate (group `rollout_draft_counted` rows with non-null `article_id`):
+
+| Column | Meaning |
+| --- | --- |
+| `duplicate_group_count` | Number of article groups with `COUNT(*) > 1` |
+| `rows_007_delete_would_remove` | `SUM(group_size - 1)` — rows the DELETE would remove |
+| `max_duplicate_group_size` | Largest duplicate group size (`0` if none) |
+| `duplicates_exist` | Boolean |
 
 ## Corrected legacy backfill impact (null semantics)
 
@@ -70,14 +83,19 @@ A synthetic harness is in [`test-inspection.sh`](test-inspection.sh):
 ./verification/m5-production/test-inspection.sh
 ```
 
-It starts an ephemeral Postgres (or uses `M5_INSPECT_PGPORT` / existing `PGDATA`), loads minimal tables, seeds null handles/titles, duplicates, and already-linked jobs, runs the inspection script, asserts expected counts, and runs negative write attempts inside a READ ONLY transaction.
+It covers:
+
+- Zero duplicate groups and multiple duplicate groups
+- Correct `SUM(count - 1)` delete estimate
+- No individual application identifiers in inspection stdout
+- Legacy backfill null-semantics / COALESCE-trap checks
+- READ ONLY write rejection + static no-write audit
 
 ## Limitations
 
 - Does not connect to production from CI/agent environments by itself.
 - Does not validate Railway env vars or secrets.
 - Does not execute migrations or prove post-migrate application behavior.
-- Aggregate duplicate listing is capped at 100 `article_id` groups.
 - Catalog queries list expected objects; absence on current production (still on `001`–`006`) is an expected pre-migrate result, not an error.
 - Read-only transaction prevents writes in-session; a privileged role could still write in a **different** session—use least privilege.
 

@@ -79,55 +79,39 @@ WHERE e.id IS NULL
 ORDER BY s.id;
 
 -- ---------------------------------------------------------------------------
--- 3) Migration 007 — duplicate rollout_draft_counted aggregates
---    DELETE keeps the lowest id per article_id; removes a.id > b.id duplicates.
---    Unique index target:
+-- 3) Migration 007 — duplicate rollout_draft_counted aggregates ONLY
+--    Detection logic matches migrate(): group by article_id where
+--      action = 'rollout_draft_counted' AND article_id IS NOT NULL
+--    DELETE keeps the lowest audit id per group; removes (n - 1) rows.
+--    This inspection never returns article_id values or other row identifiers.
+--    Unique index target (name only; not row data):
 --      audit_events_rollout_draft_counted_article_uidx
---      ON audit_events(article_id)
---      WHERE action = 'rollout_draft_counted' AND article_id IS NOT NULL
 -- ---------------------------------------------------------------------------
+WITH rollout_dup_groups AS (
+  SELECT COUNT(*) AS group_size
+  FROM audit_events
+  WHERE action = 'rollout_draft_counted'
+    AND article_id IS NOT NULL
+  GROUP BY article_id
+  HAVING COUNT(*) > 1
+)
 SELECT
-  COUNT(*) FILTER (
-    WHERE action = 'rollout_draft_counted' AND article_id IS NOT NULL
-  ) AS rollout_counted_rows_with_article,
-  COUNT(*) FILTER (
-    WHERE action = 'rollout_draft_counted' AND article_id IS NULL
-  ) AS rollout_counted_rows_null_article,
-  COALESCE((
-    SELECT SUM(n - 1)
-    FROM (
-      SELECT article_id, COUNT(*) AS n
-      FROM audit_events
-      WHERE action = 'rollout_draft_counted'
-        AND article_id IS NOT NULL
-      GROUP BY article_id
-      HAVING COUNT(*) > 1
-    ) dups
-  ), 0)::bigint AS rows_007_delete_would_remove,
+  (SELECT COUNT(*)::bigint FROM rollout_dup_groups) AS duplicate_group_count,
+  COALESCE((SELECT SUM(group_size - 1) FROM rollout_dup_groups), 0)::bigint
+    AS rows_007_delete_would_remove,
+  COALESCE((SELECT MAX(group_size) FROM rollout_dup_groups), 0)::bigint
+    AS max_duplicate_group_size,
+  EXISTS (SELECT 1 FROM rollout_dup_groups) AS duplicates_exist,
   (
     SELECT COUNT(*)::bigint
-    FROM (
-      SELECT article_id
-      FROM audit_events
-      WHERE action = 'rollout_draft_counted'
-        AND article_id IS NOT NULL
-      GROUP BY article_id
-      HAVING COUNT(*) > 1
-    ) g
-  ) AS article_ids_with_duplicate_rollout_counts
-FROM audit_events;
-
-SELECT
-  article_id,
-  COUNT(*) AS duplicate_row_count,
-  (COUNT(*) - 1) AS rows_that_would_be_deleted_for_this_article
-FROM audit_events
-WHERE action = 'rollout_draft_counted'
-  AND article_id IS NOT NULL
-GROUP BY article_id
-HAVING COUNT(*) > 1
-ORDER BY duplicate_row_count DESC, article_id
-LIMIT 100;
+    FROM audit_events
+    WHERE action = 'rollout_draft_counted' AND article_id IS NOT NULL
+  ) AS rollout_counted_rows_with_article,
+  (
+    SELECT COUNT(*)::bigint
+    FROM audit_events
+    WHERE action = 'rollout_draft_counted' AND article_id IS NULL
+  ) AS rollout_counted_rows_null_article;
 
 -- ---------------------------------------------------------------------------
 -- 4) Legacy publish_jobs → articles backfill impact
